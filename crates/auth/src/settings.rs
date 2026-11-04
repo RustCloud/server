@@ -1,6 +1,6 @@
 //! The `[accounts]` settings section.
 
-use rustcloud_core::{Error, Field, Result, Settings};
+use rustcloud_core::{zero_is_none, Error, Field, Result, Settings};
 use serde::{Deserialize, Serialize};
 
 /// Registration, sessions and login protection.
@@ -12,16 +12,21 @@ pub struct AccountSettings {
     pub open_registration: bool,
     /// How long a login lasts, in days.
     pub session_days: u32,
-    /// Storage limit given to new accounts, in MiB; `None` is unlimited.
+    /// Storage limit given to new accounts, in MiB; `None` (`0` in the
+    /// config file) is unlimited.
+    #[serde(deserialize_with = "zero_is_none")]
     pub default_quota_mib: Option<u64>,
-    /// Failed logins allowed per account within 15 minutes. One IP address
-    /// may fail five times as often, across all accounts.
+    /// Limits guessing from one IP address: it may fail five times this many
+    /// logins within 15 minutes, across all accounts, then it is blocked
+    /// until that time is over. Also the wrong current passwords allowed when
+    /// changing one's password. Accounts are never blocked: after three
+    /// failed logins their next attempts wait 1 s, 2 s, 4 s … up to a minute.
     pub max_login_failures: u32,
 }
 
 impl Default for AccountSettings {
     fn default() -> Self {
-        Self { open_registration: false, session_days: 14, default_quota_mib: None, max_login_failures: 10 }
+        Self { open_registration: false, session_days: 14, default_quota_mib: Some(10240), max_login_failures: 10 }
     }
 }
 

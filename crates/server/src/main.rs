@@ -45,6 +45,7 @@ async fn serve() -> StartupResult<()> {
         .init();
 
     let state = AppState::open(&config, journal_queue).await?;
+    create_first_admin(&state).await?;
     rustcloud_core::audit!("server.started", version = env!("CARGO_PKG_VERSION"), "server started");
     let listener = tokio::net::TcpListener::bind(config.startup.listen).await?;
     let public_url = state.server.read(|s| s.public_url.clone());
@@ -59,6 +60,26 @@ async fn serve() -> StartupResult<()> {
     // Each request gets the peer address (see `network::guard`).
     listen::serve(listener, app(state), shutdown_signal()).await;
     tracing::info!("stopped");
+    Ok(())
+}
+
+/// Creates the administrator from `RUSTCLOUD_ADMIN_USERNAME` and
+/// `RUSTCLOUD_ADMIN_PASSWORD` when the server has no accounts yet. Without
+/// them the first account is made on the setup page.
+async fn create_first_admin(state: &AppState) -> StartupResult<()> {
+    let (Ok(username), Ok(password)) =
+        (std::env::var("RUSTCLOUD_ADMIN_USERNAME"), std::env::var("RUSTCLOUD_ADMIN_PASSWORD"))
+    else {
+        return Ok(());
+    };
+    let account = rustcloud_auth::NewAccount { username, password, display_name: None, email: None };
+    match state.auth.create_first_admin(account).await? {
+        Some(admin) => tracing::info!(
+            "administrator {} created from RUSTCLOUD_ADMIN_USERNAME; RUSTCLOUD_ADMIN_PASSWORD can be removed now",
+            admin.username
+        ),
+        None => tracing::debug!("accounts exist, RUSTCLOUD_ADMIN_* are not used"),
+    }
     Ok(())
 }
 

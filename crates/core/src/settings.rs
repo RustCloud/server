@@ -65,7 +65,9 @@ impl Field {
         Self { key, kind: FieldKind::Number { unit: Some(unit), optional: false } }
     }
 
-    /// A number that may be empty ("no limit").
+    /// A number that may be empty ("no limit"). The config file can't hold
+    /// an empty value, so "no limit" is saved there as `0`: the field must
+    /// read `0` as `None`, with `#[serde(deserialize_with = "zero_is_none")]`.
     pub fn optional_number(key: &'static str, unit: &'static str) -> Self {
         Self { key, kind: FieldKind::Number { unit: Some(unit), optional: true } }
     }
@@ -77,6 +79,13 @@ impl Field {
     pub fn list(key: &'static str) -> Self {
         Self { key, kind: FieldKind::List }
     }
+}
+
+/// Reads an optional limit where `0` (and `null`) mean "no limit"; see
+/// [`Field::optional_number`].
+pub fn zero_is_none<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<u64>, D::Error> {
+    let value: Option<u64> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(value.filter(|&n| n != 0))
 }
 
 /// Current values of a settings section, shared between the module that uses
@@ -196,6 +205,23 @@ mod tests {
         assert!(live.check(json!({ "enabeld": true })).is_err(), "typo");
         assert!(live.check(json!({ "limit": "ten" })).is_err(), "wrong type");
         assert!(live.check(json!({ "limit": 0 })).is_err(), "fails validate()");
+    }
+
+    #[test]
+    fn zero_reads_as_no_limit() {
+        #[derive(Deserialize)]
+        struct Limit {
+            #[serde(default = "ten", deserialize_with = "zero_is_none")]
+            limit: Option<u64>,
+        }
+        fn ten() -> Option<u64> {
+            Some(10)
+        }
+        let read = |value| serde_json::from_value::<Limit>(value).expect("valid").limit;
+        assert_eq!(read(json!({ "limit": 0 })), None);
+        assert_eq!(read(json!({ "limit": null })), None);
+        assert_eq!(read(json!({ "limit": 5 })), Some(5));
+        assert_eq!(read(json!({})), Some(10), "missing is the default");
     }
 
     #[test]

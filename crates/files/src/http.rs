@@ -302,8 +302,11 @@ async fn public_download(
     headers: HeaderMap,
 ) -> Result<Response> {
     let node = files.public_file(&token, params.node).await?;
-    content::serve(node, &headers, params.download.is_some(), |range| files.public_download(&token, params.node, range))
-        .await
+    // A PDF is shown by the browser without a sandbox, on our address: one
+    // from a stranger (anyone can make a public link) is only downloaded.
+    let is_pdf = node.mime_type.as_deref() == Some("application/pdf");
+    let attachment = params.download.is_some() || is_pdf;
+    content::serve(node, &headers, attachment, |range| files.public_download(&token, params.node, range)).await
 }
 
 /// The request body as a stream of byte chunks.

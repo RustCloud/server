@@ -11,7 +11,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rustcloud_core::{audit, Error, Field, Result, SettingsSection};
+use rustcloud_core::{audit, Error, Field, FieldKind, Result, SettingsSection};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -121,10 +121,22 @@ impl SettingsFile {
             .as_table_mut()
             .ok_or_else(|| invalid_file(format!("`{name}` is not a table")))?;
 
+        let fields = self
+            .sections
+            .iter()
+            .find(|section| section.name() == name)
+            .map(|section| section.fields())
+            .unwrap_or_default();
         for (key, value) in values.as_object().into_iter().flatten() {
             if locked.contains(&key.as_str()) {
                 continue;
             }
+            // An empty limit is "no limit"; a missing key would be the default.
+            let no_limit = value.is_null()
+                && fields
+                    .iter()
+                    .any(|field| field.key == key && matches!(field.kind, FieldKind::Number { optional: true, .. }));
+            let value = if no_limit { &Value::from(0) } else { value };
             match to_toml(value) {
                 Some(new) => set_keeping_comments(table, key, new),
                 None => {

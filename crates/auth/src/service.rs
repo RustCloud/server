@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use rustcloud_core::{audit, validate, Error, ErrorKind, Live, Result};
-use rustcloud_db::{identity, session, user};
+use rustcloud_db::{app_password, identity, session, user};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait,
@@ -25,6 +25,9 @@ const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// One IP address may fail this many times more often than one account
 /// (it may be shared by many users, e.g. behind NAT).
 pub(crate) const IP_FAILURE_FACTOR: u32 = 5;
+/// Failed logins of one account that cost nothing; after them every next
+/// attempt waits longer.
+pub(crate) const FREE_LOGIN_FAILURES: u32 = 3;
 
 /// A user account as returned by the API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -160,6 +163,17 @@ impl Auth {
         self.create_user(account, is_first).await
     }
 
+    /// Creates the first administrator, if there are no accounts yet (from
+    /// the server's environment, so nobody has to race to the setup page).
+    /// `None` when accounts already exist.
+    pub async fn create_first_admin(&self, account: NewAccount) -> Result<Option<User>> {
+        let _guard = self.registration.lock().await;
+        if user::Entity::find().count(&self.db).await? > 0 {
+            return Ok(None);
+        }
+        self.create_user(account, true).await.map(Some)
+    }
+
     /// Creates an account with a password (used by registration and by admins).
     pub async fn create_user(&self, account: NewAccount, is_admin: bool) -> Result<User> {
         let username = validate::username(&account.username)?;
@@ -193,8 +207,10 @@ impl Auth {
 
     /// Logs in with a login method (`"password"` unless another is configured).
     ///
-    /// Failed attempts are counted per account and per client IP (when known);
-    /// either one going over the limit blocks further attempts for a while.
+    /// Failed attempts are counted per account and per client IP (when known).
+    /// After three failures an account's next attempts wait longer and
+    /// longer (up to a minute); an address over its limit is blocked for a
+    /// while.
     pub async fn login(&self, provider: &str, login: &str, secret: &str, ip: Option<IpAddr>) -> Result<NewSession> {
         let provider = self
             .providers
@@ -202,26 +218,25 @@ impl Auth {
             .find(|p| p.name() == provider)
             .ok_or_else(|| Error::bad_request("UNKNOWN_PROVIDER", "Unknown login method"))?;
 
+        // An IP address is blocked for a while after too many failures; an
+        // account only makes its next attempts wait (see
+        // `AttemptLimiter::try_start_delayed`), so nobody can lock its owner out.
         let max_failures = self.settings.read(|s| s.max_login_failures);
         let account_key = format!("{}:{}", provider.name(), login.trim().to_ascii_lowercase());
         let ip_key = ip.map(|ip| format!("ip:{ip}"));
-        let ip_allowed = ip_key
-            .as_deref()
-            .is_none_or(|key| self.limiter.is_allowed(key, max_failures.saturating_mul(IP_FAILURE_FACTOR)));
-        if !ip_allowed || !self.limiter.is_allowed(&account_key, max_failures) {
-            return Err(Error::new(
-                ErrorKind::TooManyRequests,
-                "TOO_MANY_ATTEMPTS",
-                "Too many failed logins, try again later",
-            ));
+        if let Some(key) = &ip_key {
+            if !self.limiter.try_start(key, max_failures.saturating_mul(IP_FAILURE_FACTOR)) {
+                return Err(too_many_attempts("Too many failed logins, try again later"));
+            }
+        }
+        if let Err(left) = self.limiter.try_start_delayed(&account_key, FREE_LOGIN_FAILURES) {
+            if let Some(key) = &ip_key {
+                self.limiter.forgive(key);
+            }
+            let seconds = left.as_secs_f64().ceil();
+            return Err(too_many_attempts(format!("Too many failed logins, try again in {seconds} s")));
         }
 
-        // Counted as failed before the check: a burst of attempts at once
-        // can't all slip past the limit. Taken back if it succeeds.
-        self.limiter.record_failure(&account_key);
-        if let Some(key) = &ip_key {
-            self.limiter.record_failure(key);
-        }
         let wrong = || Error::unauthorized("Wrong username or password").with_code("INVALID_CREDENTIALS");
         let Some(identity) = provider.verify(login, secret).await? else {
             // Logged with the address, so tools like fail2ban can act on it.
@@ -339,33 +354,47 @@ impl Auth {
     }
 
     /// Changes the caller's own password after checking the current one.
-    /// All other sessions of the user are ended.
+    /// All other sessions of the user are ended, and with
+    /// `revoke_app_passwords` all app passwords too.
     /// Wrong current passwords count like failed logins, so a stolen session
     /// can't be used to guess the password.
-    pub async fn change_password(&self, user: &SessionUser, current: &str, new: &str) -> Result<()> {
+    pub async fn change_password(
+        &self,
+        user: &SessionUser,
+        current: &str,
+        new: &str,
+        revoke_app_passwords: bool,
+    ) -> Result<()> {
         let key = format!("password-change:{}", user.user.id);
-        if !self.limiter.is_allowed(&key, self.settings.read(|s| s.max_login_failures)) {
-            return Err(Error::new(
-                ErrorKind::TooManyRequests,
-                "TOO_MANY_ATTEMPTS",
-                "Too many wrong passwords, try again later",
-            ));
+        if !self.limiter.try_start(&key, self.settings.read(|s| s.max_login_failures)) {
+            return Err(too_many_attempts("Too many wrong passwords, try again later"));
         }
-        self.limiter.record_failure(&key);
         let confirmed = self.passwords.verify(&user.user.username, current).await?;
         if confirmed.is_none() {
             return Err(Error::bad_request("WRONG_PASSWORD", "The current password is wrong"));
         }
         self.limiter.record_success(&key);
         validate::password(new)?;
-        self.passwords.set_password(&self.db, user.user.id, &user.user.username, new).await?;
-        session::Entity::delete_many()
-            .filter(session::Column::UserId.eq(user.user.id))
-            .filter(session::Column::Id.ne(user.session_id))
-            .exec(&self.db)
-            .await?;
-        audit!("auth.password_change", "password changed");
+        let txn = self.db.begin().await?;
+        self.passwords.set_password(&txn, user.user.id, &user.user.username, new).await?;
+        end_other_sessions(&txn, user).await?;
+        if revoke_app_passwords {
+            app_password::Entity::delete_many()
+                .filter(app_password::Column::UserId.eq(user.user.id))
+                .exec(&txn)
+                .await?;
+        }
+        txn.commit().await?;
+        audit!("auth.password_change", revoke_app_passwords, "password changed");
         Ok(())
+    }
+
+    /// Ends all sessions of the user except the current one ("log out on
+    /// other devices"); returns how many were ended.
+    pub async fn logout_others(&self, user: &SessionUser) -> Result<u64> {
+        let ended = end_other_sessions(&self.db, user).await?;
+        audit!("auth.logout_others", ended, "logged out on other devices");
+        Ok(ended)
     }
 
     /// All accounts, oldest first (admin only).
@@ -435,6 +464,21 @@ impl Auth {
             .await?
             .ok_or_else(|| Error::not_found("USER_NOT_FOUND", "User not found"))
     }
+}
+
+/// Deletes the sessions of `user` other than the current one.
+async fn end_other_sessions(db: &impl sea_orm::ConnectionTrait, user: &SessionUser) -> Result<u64> {
+    let deleted = session::Entity::delete_many()
+        .filter(session::Column::UserId.eq(user.user.id))
+        .filter(session::Column::Id.ne(user.session_id))
+        .exec(db)
+        .await?;
+    Ok(deleted.rows_affected)
+}
+
+/// The error of a refused attempt (HTTP 429).
+pub(crate) fn too_many_attempts(message: impl Into<String>) -> Error {
+    Error::new(ErrorKind::TooManyRequests, "TOO_MANY_ATTEMPTS", message)
 }
 
 /// Trims a display name; `None` or blank means "not given".

@@ -101,8 +101,14 @@ pub struct Config {
 impl Config {
     /// Loads the configuration from defaults, `file` (if it exists) and the environment.
     pub fn load(file: &Path) -> Result<Self, ConfigError> {
-        // RUSTCLOUD_CONFIG names the file itself; RUSTCLOUD_TEST_POSTGRES belongs to the tests.
-        let env = Env::prefixed("RUSTCLOUD_").split("__").ignore(&["config", "test_postgres"]);
+        // RUSTCLOUD_CONFIG names the file itself; RUSTCLOUD_TEST_POSTGRES belongs to the tests;
+        // RUSTCLOUD_ADMIN_* create the first administrator (see `main`).
+        let env = Env::prefixed("RUSTCLOUD_").split("__").ignore(&[
+            "config",
+            "test_postgres",
+            "admin_username",
+            "admin_password",
+        ]);
         let env_keys = env.iter().map(|(key, _)| key.as_str().to_owned()).filter(|key| key.contains('.')).collect();
 
         let figment = Figment::from(Toml::file(file)).merge(env);

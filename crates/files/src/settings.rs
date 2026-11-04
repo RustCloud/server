@@ -1,13 +1,15 @@
 //! The `[files]` settings section.
 
-use rustcloud_core::{Error, Field, Result, Settings};
+use rustcloud_core::{zero_is_none, Error, Field, Result, Settings};
 use serde::{Deserialize, Serialize};
 
 /// Limits of the files app.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FilesSettings {
-    /// Largest file that can be uploaded, in MiB; `None` is unlimited.
+    /// Largest file that can be uploaded, in MiB; `None` (`0` in the config
+    /// file) is unlimited.
+    #[serde(deserialize_with = "zero_is_none")]
     pub max_upload_mib: Option<u64>,
     /// Days a deleted file stays in the trash; 0: until the user empties it.
     pub trash_days: u32,
@@ -20,7 +22,7 @@ pub struct FilesSettings {
 
 impl Default for FilesSettings {
     fn default() -> Self {
-        Self { max_upload_mib: None, trash_days: 30, versions_keep: 10, versions_days: 30 }
+        Self { max_upload_mib: Some(4096), trash_days: 30, versions_keep: 10, versions_days: 30 }
     }
 }
 
@@ -44,9 +46,6 @@ impl Settings for FilesSettings {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.max_upload_mib == Some(0) {
-            return Err(Error::bad_request("INVALID_SETTINGS", "max_upload_mib must be positive"));
-        }
         if self.trash_days > 3650 {
             return Err(Error::bad_request("INVALID_SETTINGS", "trash_days must be from 0 to 3650"));
         }

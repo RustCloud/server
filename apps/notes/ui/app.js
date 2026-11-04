@@ -17,6 +17,8 @@
       pick: 'Choose a note or create a new one.',
       edit: 'Edit',
       preview: 'Preview',
+      externalImagesBlocked: (n) => `Images from other sites hidden: ${n}.`,
+      showExternalImages: 'Show them',
       delete: 'Delete',
       cancel: 'Cancel',
       confirmDelete: (title) => `Delete “${title}”?`,
@@ -42,6 +44,8 @@
       pick: 'Выберите заметку или создайте новую.',
       edit: 'Текст',
       preview: 'Просмотр',
+      externalImagesBlocked: (n) => `Скрыто картинок с других сайтов: ${n}.`,
+      showExternalImages: 'Показать',
       delete: 'Удалить',
       cancel: 'Отмена',
       confirmDelete: (title) => `Удалить «${title}»?`,
@@ -66,6 +70,8 @@
   let notes = [];
   let query = '';
   let mode = 'edit';
+  // The note whose images from other sites the reader allowed to load.
+  let externalImagesFor = null;
   let dirty = false;
   let saveTimer = null;
   let saving = Promise.resolve();
@@ -294,10 +300,24 @@
   }
 
   async function renderPreview() {
-    const response = await rustcloud.fetch('/api/preview', { method: 'POST', body: note.content });
+    // Images from other sites stay links until the reader allows them for
+    // this note: loading one tells that site who reads the note and when.
+    const external = externalImagesFor === note.id ? '?external_images=1' : '';
+    const response = await rustcloud.fetch('/api/preview' + external, { method: 'POST', body: note.content });
+    const { html, blocked_images } = await response.json();
     const preview = document.getElementById('preview');
+    if (!preview) return;
     // The HTML comes from the app's own renderer, which shows raw HTML as text.
-    if (preview) preview.innerHTML = await response.text();
+    preview.innerHTML = html;
+    if (blocked_images > 0) {
+      const show = el('button', { class: 'external-images', onclick: showExternalImages }, t.showExternalImages);
+      preview.before(el('p', { class: 'muted small' }, t.externalImagesBlocked(blocked_images), ' ', show));
+    }
+  }
+
+  function showExternalImages() {
+    externalImagesFor = note.id;
+    renderEditor();
   }
 
   function onInput(event) {

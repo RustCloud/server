@@ -39,6 +39,15 @@ async fn first_registered_user_becomes_admin_and_registration_closes() {
 }
 
 #[tokio::test]
+async fn the_first_admin_from_the_environment_is_made_only_once() {
+    let (_db, auth) = auth().await;
+    let admin = auth.create_first_admin(account("boss")).await.unwrap().unwrap();
+    assert!(admin.is_admin);
+    assert!(!auth.status().await.unwrap().needs_setup, "the setup page is closed");
+    assert!(auth.create_first_admin(account("other")).await.unwrap().is_none(), "accounts exist");
+}
+
+#[tokio::test]
 async fn open_registration_creates_regular_users() {
     let (_db, auth) = auth_with(AccountSettings { open_registration: true, ..Default::default() }).await;
     auth.register(account("admin")).await.unwrap();
@@ -125,14 +134,43 @@ async fn changing_the_password_keeps_only_the_current_session() {
     let phone = auth.login("password", "alice", "password123", None).await.unwrap();
     let laptop_session = auth.session_user(&laptop.token).await.unwrap().unwrap();
 
-    let err = auth.change_password(&laptop_session, "wrong-current", "new-password-1").await.unwrap_err();
+    let err = auth.change_password(&laptop_session, "wrong-current", "new-password-1", false).await.unwrap_err();
     assert_eq!(err.code, "WRONG_PASSWORD");
 
-    auth.change_password(&laptop_session, "password123", "new-password-1").await.unwrap();
+    auth.change_password(&laptop_session, "password123", "new-password-1", false).await.unwrap();
     assert!(auth.session_user(&laptop.token).await.unwrap().is_some());
     assert!(auth.session_user(&phone.token).await.unwrap().is_none());
     assert!(auth.login("password", "alice", "password123", None).await.is_err());
     assert!(auth.login("password", "alice", "new-password-1", None).await.is_ok());
+}
+
+#[tokio::test]
+async fn app_passwords_are_revoked_with_the_password_only_when_asked() {
+    let (_db, auth) = auth().await;
+    let alice = auth.create_user(account("alice"), false).await.unwrap();
+    let kept = auth.create_app_password(&alice, calendar_password(Access::Read)).await.unwrap();
+    let laptop = auth.login("password", "alice", "password123", None).await.unwrap();
+    let session = auth.session_user(&laptop.token).await.unwrap().unwrap();
+
+    auth.change_password(&session, "password123", "new-password-1", false).await.unwrap();
+    assert!(auth.app_password_user("alice", &kept.password, None).await.unwrap().is_some());
+    auth.change_password(&session, "new-password-1", "new-password-2", true).await.unwrap();
+    assert!(auth.app_password_user("alice", &kept.password, None).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn logging_out_on_other_devices_keeps_this_one() {
+    let (_db, auth) = auth().await;
+    auth.create_user(account("alice"), false).await.unwrap();
+    let laptop = auth.login("password", "alice", "password123", None).await.unwrap();
+    let phone = auth.login("password", "alice", "password123", None).await.unwrap();
+    let tablet = auth.login("password", "alice", "password123", None).await.unwrap();
+    let session = auth.session_user(&laptop.token).await.unwrap().unwrap();
+
+    assert_eq!(auth.logout_others(&session).await.unwrap(), 2);
+    assert!(auth.session_user(&laptop.token).await.unwrap().is_some());
+    assert!(auth.session_user(&phone.token).await.unwrap().is_none());
+    assert!(auth.session_user(&tablet.token).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -170,26 +208,29 @@ async fn profile_update_validates_and_clears_email() {
 }
 
 #[tokio::test]
-async fn repeated_failures_block_logins_for_that_account() {
-    let (_db, auth) = auth_with(AccountSettings { max_login_failures: 3, ..Default::default() }).await;
+async fn repeated_failures_make_the_account_wait_but_never_lock_it() {
+    let (_db, auth) = auth().await;
     auth.create_user(account("alice"), false).await.unwrap();
 
     for _ in 0..3 {
-        assert!(auth.login("password", "alice", "wrong-password", None).await.is_err());
+        let err = auth.login("password", "alice", "wrong-password", None).await.unwrap_err();
+        assert_eq!(err.code, "INVALID_CREDENTIALS", "the first three failures cost nothing");
     }
     let err = auth.login("password", "alice", "password123", None).await.unwrap_err();
-    assert_eq!(err.code, "TOO_MANY_ATTEMPTS", "even the right password is refused while blocked");
+    assert_eq!(err.code, "TOO_MANY_ATTEMPTS", "even the right password waits");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert!(auth.login("password", "alice", "password123", None).await.is_ok(), "after the wait the owner gets in");
 }
 
 #[tokio::test]
-async fn a_burst_of_attempts_at_once_is_held_to_the_limit() {
-    let (_db, auth) = auth_with(AccountSettings { max_login_failures: 3, ..Default::default() }).await;
+async fn a_burst_of_attempts_at_once_is_held_to_the_free_ones() {
+    let (_db, auth) = auth().await;
     auth.create_user(account("alice"), false).await.unwrap();
 
     let attempts = (0..10).map(|_| auth.login("password", "alice", "wrong-password", None));
     let results = futures_util::future::join_all(attempts).await;
     let checked = results.iter().filter(|r| r.as_ref().is_err_and(|e| e.code == "INVALID_CREDENTIALS")).count();
-    assert_eq!(checked, 3, "only as many passwords are checked as the limit allows");
+    assert_eq!(checked, 3, "only the free attempts are checked, the rest wait");
 }
 
 #[tokio::test]

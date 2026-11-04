@@ -472,8 +472,10 @@ export const api = {
   me: () => request<User>('GET', '/api/v1/auth/me'),
   updateProfile: (update: { display_name?: string; email?: string }) =>
     request<User>('PATCH', '/api/v1/auth/me', update),
-  changePassword: (current_password: string, new_password: string) =>
-    request<void>('POST', '/api/v1/auth/password', { current_password, new_password }),
+  changePassword: (current_password: string, new_password: string, revoke_app_passwords = false) =>
+    request<void>('POST', '/api/v1/auth/password', { current_password, new_password, revoke_app_passwords }),
+  /** Ends all sessions of the user except this one. */
+  logoutOthers: () => request<{ ended: number }>('POST', '/api/v1/auth/logout-others'),
 
   // Files
   root: () => request<FileNode>('GET', '/api/v1/files/root'),

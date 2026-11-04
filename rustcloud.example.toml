@@ -51,15 +51,17 @@ open_registration = false
 # How long a login lasts, in days.
 session_days = 14
 
-# Storage limit for new accounts, in MiB. Omit for unlimited.
-# default_quota_mib = 10240
+# Storage limit for new accounts, in MiB (10 GiB); 0 is unlimited.
+default_quota_mib = 10240
 
-# Failed logins allowed per account within 15 minutes (per IP address: five times more).
+# Failed logins from one IP address within 15 minutes, times five; then it is blocked
+# for the rest of that time. Accounts are never blocked: after three failed logins
+# each next attempt waits longer (1 s, 2 s, 4 s … up to a minute).
 max_login_failures = 10
 
 [files]
-# Largest file that can be uploaded, in MiB. Omit for unlimited.
-# max_upload_mib = 4096
+# Largest file that can be uploaded, in MiB (4 GiB); 0 is unlimited.
+max_upload_mib = 4096
 # Days deleted files stay in the trash before they are removed for good; 0 keeps them.
 trash_days = 30
 # Earlier versions of a file: the latest versions_keep stay in any case, and also all

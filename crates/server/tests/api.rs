@@ -245,6 +245,18 @@ async fn api_clients_use_bearer_tokens() {
         .json();
     let token = login["token"].as_str().unwrap();
 
+    // A web page gets only the cookie: its scripts can't carry the session away.
+    let page = [
+        (header::ORIGIN, "http://localhost"),
+        (header::HeaderName::from_static("sec-fetch-site"), "same-origin"),
+        (header::CONTENT_TYPE, "application/json"),
+    ];
+    let body = json!({ "username": "admin", "password": "password123" }).to_string();
+    let reply = app.send(Method::POST, "/api/v1/auth/login", As::Anonymous, Body::from(body), &page).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert!(reply.json().get("token").is_none(), "{}", reply.text());
+    assert!(reply.header(header::SET_COOKIE).contains("rustcloud_session="));
+
     let me = app.json(Method::PATCH, "/api/v1/auth/me", As::Token(token), json!({ "email": "a@b.co" })).await;
     assert_eq!(me.status, StatusCode::OK, "no CSRF header is needed with a bearer token");
     assert_eq!(app.get("/api/v1/auth/me", As::Token("wrong")).await.status, StatusCode::UNAUTHORIZED);
@@ -331,6 +343,21 @@ async fn files_round_trip_with_ranges_and_etags() {
         assert_eq!(deleted.status, StatusCode::NO_CONTENT);
     }
     assert_eq!(app.get(&content_uri, As::Browser(&cookie)).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn pdfs_of_public_links_are_downloaded_not_shown() {
+    let app = TestApp::new().await;
+    let cookie = app.register("admin").await;
+    let root = app.root_id(&cookie).await;
+    for (name, disposition) in [("paper.pdf", "attachment"), ("photo.png", "inline")] {
+        let file = app.upload(&cookie, &root, name, "%PDF-1.4").await;
+        let share = app.json(Method::POST, "/api/v1/shares", As::Browser(&cookie), json!({ "node_id": file["id"] }));
+        let token = share.await.json()["token"].as_str().unwrap().to_owned();
+        let reply = app.get(&format!("/api/v1/public/{token}/content"), As::Anonymous).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert!(reply.header(header::CONTENT_DISPOSITION).starts_with(disposition), "{name}");
+    }
 }
 
 #[tokio::test]
@@ -906,11 +933,13 @@ async fn notes_are_markdown_files_in_the_folder_the_user_gave() {
             Method::POST,
             "/app/notes/api/preview",
             As::Browser(&alice),
-            Body::from("<script>x</script>\n\n[a](javascript:alert(1)) **b**"),
+            Body::from("<script>x</script>\n\n[a](javascript:alert(1)) **b** ![t](https://t.example/x.png)"),
             &[],
         )
         .await
-        .text();
+        .json();
+    assert_eq!(preview["blocked_images"], 1, "images from other sites wait for the reader: {preview}");
+    let preview = preview["html"].as_str().unwrap();
     assert!(!preview.contains("<script") && preview.contains("&lt;script"), "raw HTML is text: {preview}");
     assert!(preview.contains("href=\"#\"") && preview.contains("<strong>b</strong>"), "{preview}");
 
@@ -1920,7 +1949,8 @@ async fn admins_change_settings_and_they_are_saved_to_the_config_file() {
     assert_eq!(sections[1]["values"]["session_days"], 7);
     assert_eq!(sections[1]["fields"][0], json!({ "key": "open_registration", "kind": "bool" }));
 
-    let new_values = json!({ "open_registration": true, "session_days": 30, "max_login_failures": 10 });
+    let new_values =
+        json!({ "open_registration": true, "session_days": 30, "max_login_failures": 10, "default_quota_mib": null });
     let reply = app.json(Method::PUT, "/api/v1/admin/settings/accounts", As::Browser(&admin), new_values).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
     assert_eq!(reply.json()["values"]["session_days"], 30);
@@ -1930,7 +1960,8 @@ async fn admins_change_settings_and_they_are_saved_to_the_config_file() {
     let file = app.config_file();
     assert!(file.contains("# my notes") && file.contains("session_days = 30 # a week"), "{file}");
     assert!(file.contains("open_registration = true"), "{file}");
-    assert!(!file.contains("default_quota_mib"), "unset values are left out: {file}");
+    assert!(file.contains("default_quota_mib = 0"), "no limit is saved as 0, not as the default: {file}");
+    assert_eq!(reply.json()["values"]["default_quota_mib"], Value::Null);
 
     let invalid = json!({ "session_days": 0 });
     let reply = app.json(Method::PUT, "/api/v1/admin/settings/accounts", As::Browser(&admin), invalid).await;

@@ -27,9 +27,12 @@ services:
       # kics-scan ignore-line
       RUSTCLOUD_DATABASE_URL: postgres://rustcloud:${POSTGRES_PASSWORD:?set it in .env}@postgres/rustcloud
       # RUSTCLOUD_SERVER__PUBLIC_URL: https://cloud.example.com
+      # The first administrator, made at start while there are no accounts:
+      # RUSTCLOUD_ADMIN_USERNAME: admin
+      # RUSTCLOUD_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       # RUSTCLOUD_SERVER__TRUSTED_PROXIES: '["172.16.0.0/12"]'
       # RUSTCLOUD_ACCOUNTS__OPEN_REGISTRATION: "false"
-      # RUSTCLOUD_FILES__MAX_UPLOAD_MIB: "4096"
+      # RUSTCLOUD_FILES__MAX_UPLOAD_MIB: "4096"   # 0: no limit
       # RUSTCLOUD_LOG: info
     volumes:
       - rustcloud-data:/data

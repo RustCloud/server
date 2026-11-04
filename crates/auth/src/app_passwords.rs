@@ -10,13 +10,13 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use rustcloud_core::{audit, Error, ErrorKind, Result};
+use rustcloud_core::{audit, Error, Result};
 use rustcloud_db::app_password;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::service::{Auth, User};
+use crate::service::{too_many_attempts, Auth, User};
 use crate::{secret, IP_FAILURE_FACTOR};
 
 /// Most app passwords per user.
@@ -155,11 +155,7 @@ impl Auth {
             .as_deref()
             .is_none_or(|key| self.limiter.is_allowed(key, max_failures.saturating_mul(IP_FAILURE_FACTOR)));
         if !ip_allowed {
-            return Err(Error::new(
-                ErrorKind::TooManyRequests,
-                "TOO_MANY_ATTEMPTS",
-                "Too many failed logins, try again later",
-            ));
+            return Err(too_many_attempts("Too many failed logins, try again later"));
         }
 
         let row = app_password::Entity::find()

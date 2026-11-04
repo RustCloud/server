@@ -59,7 +59,9 @@ struct Save {
 
 fn api(method: &str, path: &str, query: &str, body: &[u8]) -> Response {
     if (method, path) == ("POST", "/preview") {
-        return asset("text/html", &markdown::to_html(&String::from_utf8_lossy(body)));
+        let external_images = query_param(query, "external_images") == "1";
+        let preview = markdown::to_html(&String::from_utf8_lossy(body), external_images);
+        return ok(json!({ "html": preview.html, "blocked_images": preview.blocked_images }));
     }
     let folder = match notes::folder() {
         Ok(folder) => folder,

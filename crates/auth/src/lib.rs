@@ -26,7 +26,7 @@ mod settings;
 use service::IP_FAILURE_FACTOR;
 
 pub use app_passwords::{Access, AppPassword, AppPasswordUser, CreatedAppPassword, NewAppPassword, Scope};
-pub use http::{basic_credentials, router, AdminUser, CurrentUser, CSRF_HEADER, SESSION_COOKIE};
+pub use http::{basic_credentials, from_a_web_page, router, AdminUser, CurrentUser, CSRF_HEADER, SESSION_COOKIE};
 pub use limiter::AttemptLimiter;
 pub use provider::{CredentialProvider, Identity, PasswordProvider};
 pub use service::{AccountUpdate, Auth, AuthStatus, NewAccount, NewSession, ProfileUpdate, SessionUser, User};

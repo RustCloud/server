@@ -23,4 +23,4 @@ pub use audit::AUDIT_TARGET;
 pub use blob::{open_as_file, BlobStore, ByteRange, ByteStream, Capacity, SpeedTest, StorageInfo};
 pub use client::ClientInfo;
 pub use error::{Error, ErrorKind, Result};
-pub use settings::{Field, FieldKind, Live, Settings, SettingsSection};
+pub use settings::{zero_is_none, Field, FieldKind, Live, Settings, SettingsSection};

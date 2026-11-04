@@ -18,7 +18,7 @@ use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
 use axum::response::{IntoResponse, Response as HttpResponse};
 use axum::routing::any;
 use axum::Router;
-use rustcloud_auth::{basic_credentials, Access, CurrentUser};
+use rustcloud_auth::{basic_credentials, from_a_web_page, Access, CurrentUser};
 use rustcloud_core::{audit, ClientInfo, Error, Result};
 use rustcloud_files::{Files, Locking};
 use rustcloud_wasm_host::{
@@ -306,13 +306,6 @@ async fn token_services(state: &AppState, id: &str, token: &str) -> Result<Optio
     let mut services = services_for(&state.files, &state.jobs, &state.links, user, None, id, !claims.w);
     services.token = Some(claims);
     Ok(Some(services))
-}
-
-/// Whether a browser sent the request for a web page: it says where the
-/// page came from. Calendar and contacts apps send neither header.
-fn from_a_web_page(headers: &HeaderMap) -> bool {
-    let site = headers.get("sec-fetch-site").and_then(|value| value.to_str().ok());
-    headers.contains_key(header::ORIGIN) || site.is_some_and(|site| site != "none")
 }
 
 /// Methods that only read, in HTTP and in WebDAV (CalDAV, CardDAV).

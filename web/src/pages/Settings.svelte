@@ -17,6 +17,8 @@
   let newPassword = $state('');
   let passwordMessage = $state('');
   let passwordError = $state(false);
+  let revokeAppPasswords = $state(false);
+  let sessionsMessage = $state('');
 
   let usage = $state<Usage | null>(null);
   api.usage().then((u) => (usage = u));
@@ -34,13 +36,23 @@
   async function savePassword(event: SubmitEvent) {
     event.preventDefault();
     try {
-      await api.changePassword(currentPassword, newPassword);
+      await api.changePassword(currentPassword, newPassword, revokeAppPasswords);
       currentPassword = newPassword = '';
       passwordError = false;
-      passwordMessage = t.passwordChanged;
+      passwordMessage = revokeAppPasswords ? t.passwordChangedAppPasswordsRevoked : t.passwordChanged;
+      revokeAppPasswords = false;
     } catch (e) {
       passwordError = true;
       passwordMessage = errorText(e);
+    }
+  }
+
+  async function logoutOthers() {
+    try {
+      const { ended } = await api.logoutOthers();
+      sessionsMessage = t.otherSessionsEnded(ended);
+    } catch (e) {
+      sessionsMessage = errorText(e);
     }
   }
 </script>
@@ -67,9 +79,20 @@
       {t.newPassword}
       <input type="password" bind:value={newPassword} autocomplete="new-password" minlength="8" required />
     </label>
+    <label class="check">
+      <input type="checkbox" bind:checked={revokeAppPasswords} />
+      {t.revokeAppPasswords}
+    </label>
     <button type="submit" class="primary">{t.save}</button>
     {#if passwordMessage}<p class:error={passwordError} class="small">{passwordMessage}</p>{/if}
   </form>
+
+  <section class="card">
+    <h2>{t.sessions}</h2>
+    <p class="muted small">{t.sessionsHint}</p>
+    <button type="button" onclick={logoutOthers}>{t.logoutOthers}</button>
+    {#if sessionsMessage}<p class="small">{sessionsMessage}</p>{/if}
+  </section>
 
   {#if usage}
     <section class="card">

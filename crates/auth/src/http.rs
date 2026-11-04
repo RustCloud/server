@@ -6,7 +6,9 @@
 //!
 //! A client proves its session in one of two ways:
 //! - browsers: the HttpOnly cookie [`SESSION_COOKIE`] set at login;
-//! - API clients: `Authorization: Bearer <token>`.
+//! - API clients: `Authorization: Bearer <token>`, the token from the reply
+//!   to login. Web pages don't get it there: a script on the page (say,
+//!   through an XSS hole) could otherwise take the session elsewhere.
 //!
 //! Cookie-authenticated requests that change something must also send the
 //! header `X-Requested-With` (any value). Browsers do not let other sites add
@@ -24,9 +26,9 @@ use axum::{Json, Router};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rustcloud_core::{ClientInfo, Error, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::provider::PasswordProvider;
@@ -109,6 +111,14 @@ fn session_token(parts: &Parts) -> Option<(String, bool)> {
     jar.get(SESSION_COOKIE).map(|cookie| (cookie.value().to_owned(), true))
 }
 
+/// Whether a request comes from a script or form of a web page, as opposed
+/// to a program (curl, a CalDAV client) or the address bar: browsers send
+/// `Origin` with such requests, and `Sec-Fetch-Site` other than `none`.
+pub fn from_a_web_page(headers: &HeaderMap) -> bool {
+    let site = headers.get("sec-fetch-site").and_then(|value| value.to_str().ok());
+    headers.contains_key(header::ORIGIN) || site.is_some_and(|site| site != "none")
+}
+
 /// The username and password of `Authorization: Basic …`, if the request has one.
 /// Programs that can't keep a session (CalDAV clients) log in this way, with an
 /// app password.
@@ -130,6 +140,7 @@ where
         .route("/api/v1/auth/register", post(register))
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/auth/logout", post(logout))
+        .route("/api/v1/auth/logout-others", post(logout_others))
         .route("/api/v1/auth/me", get(me).patch(update_me))
         .route("/api/v1/auth/password", post(change_password))
         .route("/api/v1/admin/users", get(list_users).post(create_user))
@@ -143,12 +154,13 @@ async fn status(State(auth): State<Arc<Auth>>) -> Result<impl IntoResponse> {
 async fn register(
     State(auth): State<Arc<Auth>>,
     client: ClientInfo,
+    headers: HeaderMap,
     Json(account): Json<NewAccount>,
 ) -> Result<impl IntoResponse> {
     let password = account.password.clone();
     let user = auth.register(account).await?;
     let session = auth.login(PasswordProvider::NAME, &user.username, &password, client.ip).await?;
-    Ok((StatusCode::CREATED, start_session(session, client)))
+    Ok((StatusCode::CREATED, start_session(session, client, &headers)))
 }
 
 #[derive(Deserialize)]
@@ -162,15 +174,27 @@ struct LoginRequest {
 async fn login(
     State(auth): State<Arc<Auth>>,
     client: ClientInfo,
+    headers: HeaderMap,
     Json(request): Json<LoginRequest>,
 ) -> Result<impl IntoResponse> {
     let provider = request.provider.as_deref().unwrap_or(PasswordProvider::NAME);
     let session = auth.login(provider, &request.username, &request.password, client.ip).await?;
-    Ok(start_session(session, client))
+    Ok(start_session(session, client, &headers))
 }
 
-/// Sets the session cookie and returns the session (with the token, for API clients).
-fn start_session(session: NewSession, client: ClientInfo) -> impl IntoResponse {
+/// The reply to login and registration.
+#[derive(Serialize)]
+struct SessionReply {
+    /// For API clients only; web pages use the cookie.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
+    expires_at: DateTime<Utc>,
+    user: User,
+}
+
+/// Sets the session cookie and returns the session (with the token, for API
+/// clients that aren't web pages).
+fn start_session(session: NewSession, client: ClientInfo, headers: &HeaderMap) -> impl IntoResponse {
     let max_age = (session.expires_at - Utc::now()).num_seconds();
     let cookie = Cookie::build((SESSION_COOKIE, session.token.clone()))
         .http_only(true)
@@ -178,7 +202,8 @@ fn start_session(session: NewSession, client: ClientInfo) -> impl IntoResponse {
         .secure(client.https)
         .path("/")
         .max_age(time::Duration::seconds(max_age));
-    (CookieJar::new().add(cookie), Json(session))
+    let token = (!from_a_web_page(headers)).then_some(session.token);
+    (CookieJar::new().add(cookie), Json(SessionReply { token, expires_at: session.expires_at, user: session.user }))
 }
 
 async fn logout(State(auth): State<Arc<Auth>>, current: CurrentUser) -> Result<impl IntoResponse> {
@@ -188,6 +213,17 @@ async fn logout(State(auth): State<Arc<Auth>>, current: CurrentUser) -> Result<i
     expired.make_removal();
     let jar = CookieJar::new().add(expired);
     Ok((jar, StatusCode::NO_CONTENT))
+}
+
+/// Ends all sessions of the caller except this one.
+async fn logout_others(State(auth): State<Arc<Auth>>, current: CurrentUser) -> Result<Json<LoggedOut>> {
+    Ok(Json(LoggedOut { ended: auth.logout_others(&current.0).await? }))
+}
+
+#[derive(Serialize)]
+struct LoggedOut {
+    /// Sessions ended.
+    ended: u64,
 }
 
 async fn me(current: CurrentUser) -> Json<User> {
@@ -206,6 +242,9 @@ async fn update_me(
 struct PasswordChange {
     current_password: String,
     new_password: String,
+    /// Also revoke all app passwords (phones, calendars sign in again).
+    #[serde(default)]
+    revoke_app_passwords: bool,
 }
 
 async fn change_password(
@@ -213,7 +252,8 @@ async fn change_password(
     current: CurrentUser,
     Json(change): Json<PasswordChange>,
 ) -> Result<StatusCode> {
-    auth.change_password(&current.0, &change.current_password, &change.new_password).await?;
+    auth.change_password(&current.0, &change.current_password, &change.new_password, change.revoke_app_passwords)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
