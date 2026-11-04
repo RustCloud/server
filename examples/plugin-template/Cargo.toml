@@ -1,0 +1,22 @@
+# A RustCloud plugin on its own: copy this folder into a repository of yours.
+# It needs nothing of the server's code: only wit/app.wit and wit-bindgen.
+[package]
+name = "photo-info"
+version = "0.1.0"
+edition = "2021"
+# The template is MIT OR Apache-2.0: your plugin may use any licence, closed too.
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+[workspace]

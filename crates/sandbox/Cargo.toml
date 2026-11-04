@@ -1,0 +1,25 @@
+[package]
+name = "rustcloud-sandbox"
+description = "Runs tools for RustCloud's plugins (ffmpeg) as processes that can only compute"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# `--probe`: what a confined process may still do, for this crate's tests.
+testing = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+libc.workspace = true
+seccompiler.workspace = true
+
+[dev-dependencies]
+rustcloud-sandbox = { path = ".", features = ["testing"] }
+serde_json.workspace = true
+tempfile.workspace = true

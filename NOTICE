@@ -1,0 +1,51 @@
+RustCloud
+Copyright (C) 2026 AzimovIz
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See LICENSE.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+
+Parts under a permissive licence
+--------------------------------
+
+These parts are licensed under MIT OR Apache-2.0, at your option, so that
+plugins built on them may use any licence, closed ones included:
+
+- crates/plugin-api (the plugin contract, including wit/app.wit);
+- examples/plugin-template;
+- code examples in docs/dev.
+
+See LICENSE-MIT and LICENSE-APACHE in those directories.
+
+A plugin talks to the server only through this contract and runs as a separate
+WebAssembly component. Installing a plugin into RustCloud does not change the
+plugin's licence.
+
+
+Third-party software in the Docker image
+----------------------------------------
+
+The image contains ffmpeg and ffprobe, built by docker/build-ffmpeg.sh without
+--enable-gpl, so they are under the GNU Lesser General Public License 2.1 or
+later. They are separate programs that RustCloud runs; they are not linked into
+it. Statically linked into them:
+
+- FFmpeg 8.1.3 (LGPL-2.1-or-later): https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz
+- dav1d 1.5.1 (BSD-2-Clause): https://code.videolan.org/videolan/dav1d
+- OpenH264 2.6.0 (BSD-2-Clause): https://github.com/cisco/openh264
+- libwebp (BSD-3-Clause) and zlib (Zlib) from Alpine Linux packages.
+
+docker/build-ffmpeg.sh is the exact recipe: it downloads these sources and
+shows every configure option. The image keeps the licence texts of FFmpeg,
+dav1d and OpenH264 in /usr/share/doc/rustcloud/third-party/.
+
+The RustCloud binary links Rust crates and bundles a web interface built from
+npm packages; they are under permissive licences (MIT, Apache-2.0, BSD,
+ISC, Zlib, Unicode-3.0, CC0-1.0 and the like). Cargo.lock and
+web/package-lock.json list them with their versions.

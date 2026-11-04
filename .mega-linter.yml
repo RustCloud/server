@@ -1,0 +1,44 @@
+# MegaLinter configuration for RustCloud
+# https://megalinter.io/latest/configuration/
+
+APPLY_FIXES: none
+
+# Языки и линтеры
+DISABLE_LINTERS:
+  - SPELL_CSPELL            # английский словарь: каждое русское слово — ошибка
+  - SPELL_LYCHEE            # проверка ссылок через интернет
+  - REPOSITORY_GRYPE        # качает базу уязвимостей из интернета (~15 мин)
+  - REPOSITORY_TRIVY        # то же
+  - REPOSITORY_TRIVY_SBOM
+  - REPOSITORY_SYFT         # строит SBOM, ничего не проверяет
+  - REPOSITORY_CHECKOV      # ~3 мин на каждый прогон, пересекается с kics
+  - HTML_HTMLHINT           # не понимает шаблоны ({{ }}, {% %})
+  - COPYPASTE_JSCPD         # смотрит весь проект: в каждом прогоне те же старые дубли
+  - RUST_CLIPPY             # clippy с -D warnings запускает test.yml на свежем Rust;
+                            # в образе MegaLinter rustc старее, чем требует SeaORM (1.94)
+  - JAVASCRIPT_STANDARD     # стиль standard (без «;») расходится с принятым Prettier-стилем;
+  - TYPESCRIPT_STANDARD     # типы и Svelte проверяет svelte-check --fail-on-warnings в test.yml
+
+# Стиль и оформление: в лог как предупреждения, коммит не красят.
+DISABLE_ERRORS_LINTERS:
+  - BASH_SHFMT
+  - CSS_STYLELINT
+  - HTML_DJLINT
+  - JSON_PRETTIER
+  - JAVASCRIPT_PRETTIER
+  - TYPESCRIPT_PRETTIER
+  - MARKDOWN_MARKDOWNLINT
+  - MARKDOWN_MARKDOWN_TABLE_FORMATTER
+  - PYTHON_BLACK
+  - PYTHON_ISORT
+  - YAML_PRETTIER
+  - YAML_YAMLLINT
+
+# Ошибкой считаются только warning и error; info и style скрыты.
+BASH_SHELLCHECK_ARGUMENTS: --severity=warning
+
+# Файлы для проверки
+VALIDATE_ALL_CODEBASE: true
+
+# Игнорировать артефакты сборки и временные файлы
+FILTER_REGEX_EXCLUDE: (target/|\.git/|Cargo\.lock)

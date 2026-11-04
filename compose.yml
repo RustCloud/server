@@ -1,0 +1,81 @@
+# RustCloud with PostgreSQL.
+#
+# kics "Shared Volumes Between Containers" does not apply: each volume is used by one service.
+# kics-scan disable=8c978947-0ff6-485c-b0c2-0bfca6026466
+#
+# 1. Put the database password into .env:
+#      echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" > .env
+# 2. docker compose up -d
+# 3. Open http://localhost:8080 and create the first (admin) account.
+#
+# The image is the latest release (published by .github/workflows/release.yml);
+# use :<short commit sha> to pin a release, or "build: ." to build locally.
+#
+# Settings: uncomment RUSTCLOUD_* variables below, or change them on the admin page
+# (variables win and lock the setting there). All settings: docs/configuration.md.
+#
+# The port is bound to 127.0.0.1: put an HTTPS reverse proxy in front and set
+# RUSTCLOUD_SERVER__PUBLIC_URL. Use "8080:8080" to listen on all interfaces.
+
+services:
+  rustcloud:
+    image: ghcr.io/rustcloud/server:latest
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # The password comes from .env, not from this file.
+      # kics-scan ignore-line
+      RUSTCLOUD_DATABASE_URL: postgres://rustcloud:${POSTGRES_PASSWORD:?set it in .env}@postgres/rustcloud
+      # RUSTCLOUD_SERVER__PUBLIC_URL: https://cloud.example.com
+      # RUSTCLOUD_SERVER__TRUSTED_PROXIES: '["172.16.0.0/12"]'
+      # RUSTCLOUD_ACCOUNTS__OPEN_REGISTRATION: "false"
+      # RUSTCLOUD_FILES__MAX_UPLOAD_MIB: "4096"
+      # RUSTCLOUD_LOG: info
+    volumes:
+      - rustcloud-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 3s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      # The password comes from .env, not from this file.
+      # kics-scan ignore-line
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set it in .env}
+      POSTGRES_USER: rustcloud
+      POSTGRES_DB: rustcloud
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # The entrypoint fixes data directory ownership, then drops to the postgres user;
+    # these are the capabilities it needs for that.
+    # kics-scan ignore-line
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "rustcloud"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  rustcloud-data:
+  postgres-data:

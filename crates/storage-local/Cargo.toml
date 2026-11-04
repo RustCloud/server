@@ -1,0 +1,19 @@
+[package]
+name = "rustcloud-storage-local"
+description = "Blob store for RustCloud that keeps file contents in a local directory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+rustcloud-core.workspace = true
+rustix = { version = "1", features = ["fs"] }
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+tempfile.workspace = true

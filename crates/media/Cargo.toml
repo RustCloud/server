@@ -1,0 +1,31 @@
+[package]
+name = "rustcloud-media"
+description = "RustCloud's media engine: its own ffmpeg in a sandbox and photo metadata, for plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# `media-sandbox`, a stand-in for `rustcloud sandbox` in this crate's tests.
+testing = []
+
+[[bin]]
+name = "media-sandbox"
+path = "src/bin/media-sandbox.rs"
+required-features = ["testing"]
+
+[dependencies]
+chrono.workspace = true
+nom-exif.workspace = true
+rustcloud-core.workspace = true
+rustcloud-sandbox.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rustcloud-media = { path = ".", features = ["testing"] }
+tempfile.workspace = true
+tokio.workspace = true

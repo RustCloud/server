@@ -1,0 +1,18 @@
+id = "calendar"
+version = "0.1.0"
+api = "^0.2"
+
+[name]
+en = "Calendar"
+ru = "Календарь"
+
+[provides]
+"rustcloud:calendar" = "0.1.0"
+
+# Phones and desktop calendars find CalDAV here.
+[well_known]
+caldav = "/dav/"
+
+[ui]
+icon = "calendar"
+entry = "/app/calendar"

@@ -1,0 +1,23 @@
+id = "photo-info"
+version = "0.1.0"
+# The version of wit/app.wit; older servers refuse the plugin with a reason.
+api = "^0.2.16"
+
+[name]
+en = "Photo info"
+ru = "Сведения о фото"
+
+[permissions]
+# The administrator approves these when enabling the plugin.
+files = "folder"
+use = ["ffmpeg"]
+
+# What it needs of the server, as multiples of 64 MiB of memory (a quarter of
+# it for a file read at once) and 10 s of work; the administrator may change it.
+# [limits]
+# memory = 2
+# time = 1
+
+[ui]
+icon = "image"
+entry = "/app/photo-info"

@@ -1,0 +1,31 @@
+[package]
+name = "rustcloud-wasm-host"
+description = "Runs RustCloud apps (plugins) compiled to WebAssembly components"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# Test helpers (the echo app) for this crate's and the server's tests.
+testing = []
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+rustcloud-core.workspace = true
+rustcloud-plugin-api.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+axum.workspace = true
+rustcloud-wasm-host = { path = ".", features = ["testing"] }
+tempfile.workspace = true
+tokio.workspace = true

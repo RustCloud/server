@@ -1,0 +1,32 @@
+[package]
+name = "rustcloud-files"
+description = "File tree, uploads, downloads and public links for RustCloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+mime_guess.workspace = true
+rand.workspace = true
+rustcloud-auth.workspace = true
+rustcloud-core.workspace = true
+rustcloud-db.workspace = true
+rustcloud-plugin-api.workspace = true
+sea-orm.workspace = true
+serde.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+rustcloud-db = { workspace = true, features = ["testing"] }
+rustcloud-storage-local.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

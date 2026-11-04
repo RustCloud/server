@@ -1,0 +1,18 @@
+# A test app for the WASM host: one route per behaviour the host must handle.
+# Built by the tests for wasm32-wasip2; not part of the main workspace.
+[package]
+name = "echo"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+
+[workspace]

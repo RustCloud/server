@@ -1,0 +1,19 @@
+id = "notes"
+version = "0.1.0"
+api = "^0.2"
+
+[name]
+en = "Notes"
+ru = "Заметки"
+
+[provides]
+"rustcloud:notes" = "0.1.0"
+
+# Notes are .md files in one folder the user chooses (or creates).
+[permissions]
+files = "folder"
+files_write = true
+
+[ui]
+icon = "note"
+entry = "/app/notes"

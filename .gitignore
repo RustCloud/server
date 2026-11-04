@@ -1,0 +1,20 @@
+# Rust
+/target/
+/apps/*/target/
+
+# Web UI
+/web/node_modules/
+/web/dist/
+
+# Local runtime data (rustcloud.toml data_dir default)
+/data/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+/web/e2e/node_modules/
+/web/e2e/shots/
+/web/e2e/failure.png
+.env

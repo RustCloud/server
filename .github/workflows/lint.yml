@@ -1,0 +1,534 @@
+name: Lint
+
+# Статический анализ MegaLinter: сам определяет языки репозитория и запускает
+# подходящие линтеры. Файл универсальный — его можно класть в любой репозиторий
+# без правок.
+#
+# Как работает:
+# - push: проверяются только файлы, изменённые этим push'ем (относительно коммита
+#   до push'а; для новой ветки — относительно ветки по умолчанию). Линтеры уровня
+#   проекта (секреты, clippy, IaC) смотрят весь репозиторий.
+# - ручной запуск (Run workflow) или LINT_FULL_CHECK=true (см. env ниже):
+#   проверяется весь репозиторий.
+# - Ошибки красят коммит в красный, подробности — в логе шага MegaLinter
+#   (в конце лога — сводная таблица). Мерж не блокируется, пока проверка
+#   не добавлена в обязательные (required checks) защиты ветки.
+# - Сводка в Markdown печатается шагом Report.
+# - Стилевые замечания (форматирование, оформление Markdown/YAML/CSS, дубли кода)
+#   выводятся в лог как предупреждения и не красят коммит.
+#
+# Осознанно нарушить правило:
+# - в коде — комментарием самого линтера (# shellcheck disable=SC2086, # noqa,
+#   // eslint-disable-next-line, # yamllint disable-line и т. п.);
+# - для коммита целиком — [skip ci] в сообщении коммита (не запускается весь CI).
+#
+# Настройка под репозиторий: свой .mega-linter.yml в корне заменяет встроенный
+# конфиг целиком (https://megalinter.io/latest/configuration/). Родные
+# конфиги линтеров (.shellcheckrc, .markdownlint.json, .yamllint, pyproject.toml…)
+# подхватываются и без него.
+#
+# Задача sbom (ниже) строит SBOM, ранжирует лицензии зависимостей и ищет
+# в них известные уязвимости.
+#
+# Обе задачи работают в образе MegaLinter (в нём есть syft и trivy).
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # true — при каждом push проверять весь репозиторий, а не только изменённые файлы.
+  # Можно поменять здесь или задать переменной Actions LINT_FULL_CHECK
+  # в настройках репозитория/организации (она важнее значения по умолчанию).
+  LINT_FULL_CHECK: ${{ vars.LINT_FULL_CHECK || 'false' }}
+
+jobs:
+  megalinter:
+    runs-on: ubuntu-latest
+    container:
+      image: oxsecurity/megalinter-cupcake:v9.4.0
+    steps:
+      # В образе MegaLinter глобально включён core.autocrlf=true: без отключения
+      # checkout получает файлы с CRLF, и линтеры ругаются на каждую строку.
+      - name: Prepare
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Что проверять. MegaLinter сравнивает HEAD с origin/<DEFAULT_BRANCH>, поэтому
+      # базу сравнения кладём в ref origin/megalinter-base и передаём её имя.
+      - name: Select changed files
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "LINT_FULL_CHECK=$LINT_FULL_CHECK"
+          base=""
+          if [ "$EVENT" != workflow_dispatch ] && [ "$LINT_FULL_CHECK" != true ]; then
+            if [ -n "$BEFORE" ] && ! echo "$BEFORE" | grep -qE '^0+$' && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              base="$BEFORE"
+            elif [ -n "$DEFAULT" ] && [ "$REF_NAME" != "$DEFAULT" ] && git rev-parse -q --verify "origin/$DEFAULT" >/dev/null; then
+              base="origin/$DEFAULT"
+            elif git rev-parse -q --verify HEAD~1 >/dev/null; then
+              base="HEAD~1"
+            fi
+          fi
+          if [ -z "$base" ]; then
+            echo "Проверяется весь репозиторий"
+            echo "VALIDATE_ALL_CODEBASE=true" >> "$GITHUB_ENV"
+            # gitleaks — вся история, но только текущей ветки, а не всех (git log --all).
+            echo "REPOSITORY_GITLEAKS_ARGUMENTS=--log-opts=HEAD" >> "$GITHUB_ENV"
+          else
+            git update-ref refs/remotes/origin/megalinter-base "$(git rev-parse "$base")"
+            echo "Проверяются файлы, изменённые относительно $base:"
+            git diff --name-only origin/megalinter-base...HEAD | sed 's/^/  /'
+            echo "VALIDATE_ALL_CODEBASE=false" >> "$GITHUB_ENV"
+            echo "DEFAULT_BRANCH=megalinter-base" >> "$GITHUB_ENV"
+            # gitleaks по умолчанию смотрит историю всех веток (git log --all):
+            # секрет в чужой ветке красил бы каждый push. Только коммиты этого push'а.
+            echo "REPOSITORY_GITLEAKS_ARGUMENTS=--log-opts=origin/megalinter-base..HEAD" >> "$GITHUB_ENV"
+          fi
+
+      # Встроенный конфиг — только если в репозитории нет своего. Лежит вне
+      # рабочего каталога, чтобы линтеры его не проверяли.
+      - name: Default config
+        run: |
+          for f in .mega-linter.yml .megalinter.yml .mega-linter.yaml .megalinter.yaml; do
+            if [ -f "$f" ]; then echo "Используется конфиг репозитория: $f"; exit 0; fi
+          done
+          echo "Используется встроенный конфиг"
+          cat > /tmp/mega-linter-default.yml <<'EOF'
+          APPLY_FIXES: none
+          DISABLE_LINTERS:
+            - SPELL_CSPELL            # английский словарь: каждое русское слово — ошибка
+            - SPELL_LYCHEE            # проверка ссылок через интернет
+            - REPOSITORY_GRYPE        # качает базу уязвимостей из интернета (~15 мин)
+            - REPOSITORY_TRIVY        # то же
+            - REPOSITORY_TRIVY_SBOM
+            - REPOSITORY_SYFT         # строит SBOM, ничего не проверяет
+            - REPOSITORY_CHECKOV      # ~3 мин на каждый прогон, пересекается с kics
+            - HTML_HTMLHINT           # не понимает шаблоны ({{ }}, {% %})
+            - COPYPASTE_JSCPD         # смотрит весь проект: в каждом прогоне те же старые дубли
+          # Стиль и оформление: в лог как предупреждения, коммит не красят.
+          DISABLE_ERRORS_LINTERS:
+            - BASH_SHFMT
+            - CSS_STYLELINT
+            - HTML_DJLINT
+            - JSON_PRETTIER
+            - JAVASCRIPT_PRETTIER
+            - TYPESCRIPT_PRETTIER
+            - MARKDOWN_MARKDOWNLINT
+            - MARKDOWN_MARKDOWN_TABLE_FORMATTER
+            - PYTHON_BLACK
+            - PYTHON_ISORT
+            - YAML_PRETTIER
+            - YAML_YAMLLINT
+          # Ошибкой считаются только warning и error; info и style скрыты.
+          BASH_SHELLCHECK_ARGUMENTS: --severity=warning
+          EOF
+          echo "MEGALINTER_CONFIG=/tmp/mega-linter-default.yml" >> "$GITHUB_ENV"
+
+      - name: MegaLinter
+        env:
+          DEFAULT_WORKSPACE: ${{ github.workspace }}
+          # Отчёты в GitHub не нужны; результаты — в логе.
+          GITHUB_COMMENT_REPORTER: "false"
+          GITHUB_STATUS_REPORTER: "false"
+          FLAVOR_SUGGESTIONS: "false"
+          PRINT_ALPACA: "false"
+          SHOW_ELAPSED_TIME: "true"
+        run: /entrypoint.sh
+
+      # Markdown-отчёт — и в лог (MegaLinter пишет его ещё и в job summary).
+      - name: Report
+        if: always()
+        run: |
+          f=megalinter-reports/megalinter-report.md
+          if [ -f "$f" ]; then cat "$f"; else echo "Отчёт не создан"; fi
+
+  # SBOM и лицензии зависимостей — отдельная задача, от MegaLinter не зависит.
+  # syft собирает SBOM (CycloneDX) по манифестам и lock-файлам любых языков; для
+  # Rust лицензии берутся из cargo metadata. Каждая зависимость получает уровень:
+  #   CRITICAL — запрещена для закрытого продукта (AGPL, SSPL, BUSL, NC…);
+  #   HIGH     — copyleft, требует открыть код продукта (GPL, LGPL…);
+  #   MEDIUM   — слабый copyleft (MPL, EPL, CDDL);
+  #   UNKNOWN  — лицензия не определена, проверить вручную;
+  #   LOW      — permissive (MIT, Apache, BSD…).
+  # В выражениях SPDX из вариантов через OR берётся самый мягкий, через AND — самый
+  # строгий.
+  # Роль зависимости (для Rust — по графу cargo для целевой платформы SBOM_TARGET /
+  # CARGO_BUILD_TARGET / платформы сборщика):
+  #   runtime        — входит в продукт;
+  #   build          — «привлекается» только для сборки: build-dependencies,
+  #                    proc-macro и их зависимости, toolchain (rustc, cargo);
+  #   dev            — только для тестов (dev-dependencies);
+  #   other-platform — нужна только под другие платформы.
+  # Роль пишется в SBOM: scope (required — в продукте, excluded — нет) и свойство
+  # dependency:role. Для других экосистем роль не определяется («—», считается runtime).
+  # Задача красная при CRITICAL/HIGH у того, что входит в продукт. Осознанно
+  # разрешить зависимость — строкой в .sbom-allow в корне репозитория:
+  # <пакет>[@версия]  # причина
+  # Затем по тому же SBOM — поиск известных уязвимостей (шаг Vulnerabilities).
+  sbom:
+    runs-on: ubuntu-latest
+    container:
+      image: oxsecurity/megalinter-cupcake:v9.4.0
+    steps:
+      - name: Prepare
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # С интернетом syft дополняет лицензии Go/Java/JS/Python из реестров пакетов;
+      # без него (закрытый контур) такие зависимости могут оказаться UNKNOWN.
+      # Зависимости Rust syft видит только по Cargo.lock; в приложениях и библиотеках
+      # его часто не хранят в git, поэтому для сканирования он генерируется.
+      - name: SBOM
+        run: |
+          if [ -f Cargo.toml ] && [ ! -f Cargo.lock ]; then
+            echo "В репозитории нет Cargo.lock: генерируется для сканирования"
+            cargo generate-lockfile
+          fi
+          enrich=""
+          if curl -sS --max-time 5 -o /dev/null https://proxy.golang.org; then enrich="--enrich all"; fi
+          syft scan dir:. -q $enrich -o cyclonedx-json=/tmp/sbom.cdx.json
+          python3 - /tmp/sbom.cdx.json <<'PY'
+          """SBOM: лицензии зависимостей с ранжированием по риску для закрытого продукта.
+
+          Вход: CycloneDX JSON от syft. Для Rust лицензии и роли зависимостей берутся
+          из cargo metadata (в Cargo.lock их нет). Роль пишется в SBOM (scope и свойство
+          dependency:role). Выход: таблица в лог, Markdown в job summary, код возврата 1,
+          если у runtime-зависимостей есть CRITICAL/HIGH, не разрешённые в .sbom-allow.
+          """
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          SBOM, ALLOW = sys.argv[1], ".sbom-allow"
+
+          # Уровни: чем больше число, тем выше риск. UNKNOWN — между LOW и MEDIUM:
+          # в "A OR B" побеждает известная мягкая лицензия, в "A AND B" — неизвестная.
+          LEVEL = {"LOW": 1, "UNKNOWN": 1.5, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+          NAME = {v: k for k, v in LEVEL.items()}
+          # Категории (по SPDX id, регулярки без учёта регистра).
+          RULES = [
+              ("CRITICAL", "запрещена", r"\b(AGPL|SSPL|BUSL|Commons-Clause|CC-BY-NC|Elastic-2)|"
+               r"affero|server side public|business source"),
+              ("HIGH", "copyleft", r"\b(L?GPL(v\d)?|EUPL|OSL|CC-BY-SA|Sleepycat|QPL)\b|"
+               r"general public|lesser general"),
+              ("MEDIUM", "слабый copyleft", r"\b(MPL|EPL|CDDL|CPL|APSL|Ms-RL)\b|mozilla public|eclipse public"),
+              ("LOW", "без ограничений", r"\b(Unlicense|CC0|WTFPL|0BSD)\b|public domain"),
+              ("LOW", "permissive", r"\b(MIT|MIT-0|Apache|BSD|ISC|Zlib|Unicode|BSL-1\.0|PSF|Python-2\.0|"
+               r"OpenSSL|X11|PostgreSQL|NCSA|CC-BY-[34]|Artistic-2|OFL|Ruby|bzip2|libpng)\b"),
+          ]
+
+
+          def classify(lic):
+              for level, cat, rx in RULES:
+                  if re.search(rx, lic, re.I):
+                      return LEVEL[level], cat
+              return LEVEL["UNKNOWN"], "неизвестна"
+
+
+          def evaluate(expr):
+              """Уровень выражения SPDX: OR — минимум, AND — максимум, WITH — по базе."""
+              expr = re.sub(r"\s*/\s*", " OR ", expr)  # старая запись cargo: MIT/Apache-2.0
+              toks = re.findall(r"\(|\)|[^\s()]+", expr)
+              pos = 0
+
+              def peek():
+                  return toks[pos].upper() if pos < len(toks) else None
+
+              def factor():
+                  nonlocal pos
+                  if peek() == "(":
+                      pos += 1
+                      v = disj()
+                      pos += 1  # ")"
+                      return v
+                  name = []
+                  while peek() not in (None, "(", ")", "AND", "OR", "WITH"):
+                      name.append(toks[pos])
+                      pos += 1
+                  v = classify(" ".join(name))[0]
+                  if peek() == "WITH":
+                      pos += 2  # исключение (LLVM-exception, Classpath…) не ужесточает
+                  return v
+
+              def conj():
+                  nonlocal pos
+                  v = factor()
+                  while peek() == "AND":
+                      pos += 1
+                      v = max(v, factor())
+                  return v
+
+              def disj():
+                  nonlocal pos
+                  v = conj()
+                  while peek() == "OR":
+                      pos += 1
+                      v = min(v, conj())
+                  return v
+
+              return disj() if toks else LEVEL["UNKNOWN"]
+
+
+          def license_of(c):
+              parts = []
+              for entry in c.get("licenses") or []:
+                  if "expression" in entry:
+                      parts.append(entry["expression"])
+                  else:
+                      l = entry.get("license", {})
+                      parts.append(l.get("id") or l.get("name") or "")
+              parts = [p for p in parts if p]
+              # Несколько найденных лицензий считаем действующими вместе.
+              return " AND ".join(f"({p})" if " " in p else p for p in parts)
+
+
+          sbom = json.load(open(SBOM))
+          comps = sbom.get("components", [])
+
+          # Роли зависимостей:
+          #   runtime        — входит в продукт (обычные зависимости и их зависимости);
+          #   build          — нужна только для сборки: build-dependencies, proc-macro и их
+          #                    зависимости, toolchain;
+          #   dev            — только для тестов и бенчмарков (dev-dependencies);
+          #   other-platform — нужна только под другие платформы, в продукт не собирается.
+          # Для экосистем без такой информации роль не определена ("—") и такие пакеты
+          # считаются runtime.
+          ROLES = ["runtime", "build", "dev", "other-platform"]
+          role_of = {}
+
+
+          def cargo_metadata(*args):
+              return json.loads(subprocess.check_output(
+                  ["cargo", "metadata", "--format-version", "1", "--locked", *args],
+                  stderr=subprocess.DEVNULL))
+
+
+          # Rust: лицензии, свои крейты и роли из cargo metadata. Граф строится для целевой
+          # платформы (SBOM_TARGET, CARGO_BUILD_TARGET или платформа сборщика): рёбра под
+          # другие платформы cargo в нём отбрасывает.
+          cargo, own = {}, set()
+          if os.path.isfile("Cargo.toml"):
+              try:
+                  target = os.environ.get("SBOM_TARGET") or os.environ.get("CARGO_BUILD_TARGET") or re.search(
+                      r"^host: (\S+)", subprocess.check_output(["rustc", "-vV"], text=True), re.M).group(1)
+                  meta = cargo_metadata("--filter-platform", target)
+                  pkgs = {p["id"]: p for p in meta["packages"]}
+                  for p in pkgs.values():
+                      cargo[(p["name"], p["version"])] = p.get("license") or ""
+                      if p.get("source") is None:
+                          own.add((p["name"], p["version"]))
+                  proc_macro = {i for i, p in pkgs.items()
+                                if any("proc-macro" in t["kind"] for t in p["targets"])}
+                  nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+                  best = {}
+                  queue = [(m, "runtime", True) for m in meta["workspace_members"]]
+                  while queue:
+                      pid, role, member = queue.pop()
+                      if pid in best and ROLES.index(best[pid]) <= ROLES.index(role):
+                          continue
+                      best[pid] = role
+                      for dep in nodes[pid]["deps"]:
+                          for k in dep["dep_kinds"]:
+                              if k["kind"] == "dev":
+                                  if not member:
+                                      continue
+                                  new = "dev" if role == "runtime" else role
+                              elif k["kind"] == "build" or dep["pkg"] in proc_macro:
+                                  new = "build" if role == "runtime" else role
+                              else:
+                                  new = role
+                              queue.append((dep["pkg"], new, False))
+                  role_of = {(pkgs[i]["name"], pkgs[i]["version"]): r for i, r in best.items()}
+                  # Крейты из Cargo.lock, которых нет в графе целевой платформы.
+                  for p in cargo_metadata()["packages"]:
+                      key = (p["name"], p["version"])
+                      cargo.setdefault(key, p.get("license") or "")
+                      role_of.setdefault(key, "other-platform")
+                  print(f"Роли Rust-зависимостей — для платформы {target}")
+                  # Toolchain тоже «привлекается» для сборки; версия — из rust-toolchain(.toml).
+                  channel = "не закреплена"
+                  for f in ("rust-toolchain.toml", "rust-toolchain"):
+                      if os.path.isfile(f):
+                          m = re.search(r'channel\s*=\s*"([^"]+)"', open(f).read()) or re.match(r"\s*(\S+)", open(f).read())
+                          channel = m.group(1) if m else channel
+                          break
+                  for tool in ("rustc", "cargo"):
+                      comps.append({"type": "application", "name": tool, "version": channel,
+                                    "licenses": [{"expression": "MIT OR Apache-2.0"}]})
+                      role_of[(tool, channel)] = "build"
+              except Exception as e:  # нет cargo или нет доступа к реестру крейтов
+                  print(f"cargo metadata недоступен ({e}): лицензии и роли крейтов неизвестны")
+
+          for c in comps:
+              key = (c.get("name"), c.get("version"))
+              if c.get("purl", "").startswith("pkg:cargo/") and not c.get("licenses") and cargo.get(key):
+                  c["licenses"] = [{"expression": cargo[key]}]
+              role = role_of.get(key)
+              if role:
+                  # CycloneDX: required — входит в продукт, excluded — не входит.
+                  c["scope"] = "required" if role == "runtime" else "excluded"
+                  c["properties"] = [p for p in c.get("properties", []) if p.get("name") != "dependency:role"]
+                  c["properties"].append({"name": "dependency:role", "value": role})
+          json.dump(sbom, open(SBOM, "w"), indent=1)
+
+          allow = {}
+          if os.path.isfile(ALLOW):
+              for line in open(ALLOW, encoding="utf-8"):
+                  item, _, why = line.partition("#")
+                  if item.strip():
+                      allow[item.strip()] = why.strip()
+
+          rows = []
+          for c in comps:
+              name, ver = c.get("name", "?"), c.get("version", "")
+              if (name, ver) in own or c.get("type") == "file":
+                  continue
+              lic = license_of(c)
+              level = evaluate(lic) if lic else LEVEL["UNKNOWN"]
+              eco = re.match(r"pkg:([^/]+)/", c.get("purl", ""))
+              ok = allow.get(f"{name}@{ver}", allow.get(name))
+              role = role_of.get((name, ver))
+              rows.append((level, name, ver, lic or "—", eco.group(1) if eco else c.get("type", ""), ok, role))
+          # Сначала то, что входит в продукт; внутри роли — по уровню риска.
+          rows.sort(key=lambda r: (ROLES.index(r[6]) if r[6] else 0, -r[0], r[1].lower()))
+          if not rows:
+              # Пустой SBOM обычно значит, что нет lock-файлов (package-lock.json,
+              # poetry.lock, go.sum…): проверять было нечего — сказать об этом явно.
+              print("::warning::SBOM пуст: зависимости не найдены (нет lock-файлов?)")
+
+
+          def in_product(r):
+              return r[6] in (None, "runtime")
+
+
+          counts = {k: sum(1 for r in rows if NAME[r[0]] == k and in_product(r))
+                    for k in ("CRITICAL", "HIGH", "MEDIUM", "UNKNOWN", "LOW")}
+          blocking = [r for r in rows if r[0] >= LEVEL["HIGH"] and r[5] is None and in_product(r)]
+          total = " · ".join(f"{k}: {v}" for k, v in counts.items())
+          by_role = " · ".join(f"{k}: {sum(1 for r in rows if (r[6] or 'runtime') == k)}" for k in ROLES)
+
+          HINT = {"CRITICAL": "запрещена для закрытого продукта (AGPL, SSPL, BUSL, NC…)",
+                  "HIGH": "copyleft: требует открыть код продукта (GPL, LGPL при статической сборке…)",
+                  "MEDIUM": "слабый copyleft: открыть изменения самой библиотеки (MPL, EPL, CDDL)",
+                  "UNKNOWN": "лицензия не определена — проверить вручную",
+                  "LOW": "без ограничений, нужно сохранить уведомление (MIT, Apache, BSD…)"}
+          ROLE_HINT = {"runtime": "входит в продукт",
+                       "build": "только для сборки (build-dependencies, proc-macro, toolchain)",
+                       "dev": "только для тестов (dev-dependencies)",
+                       "other-platform": "только для других платформ, в продукт не собирается"}
+
+          print(f"Компонентов: {len(rows)} · {by_role}")
+          print(f"Лицензии того, что входит в продукт: {total}\n")
+          for k in ("CRITICAL", "HIGH", "MEDIUM", "UNKNOWN", "LOW"):
+              print(f"  {k:14} {HINT[k]}")
+          for k in ROLES:
+              print(f"  {k:14} {ROLE_HINT[k]}")
+          print("  Ошибкой считаются только CRITICAL/HIGH у того, что входит в продукт.\n")
+          w = max([len(r[1]) for r in rows] + [7])
+          print(f"{'Роль':14} {'Уровень':9} {'Пакет':{w}} {'Версия':12} {'Тип':6} Лицензия")
+          for level, name, ver, lic, eco, ok, role in rows:
+              mark = f"  [разрешено: {ok or 'в ' + ALLOW}]" if ok is not None and level >= LEVEL["MEDIUM"] else ""
+              print(f"{role or '—':14} {NAME[level]:9} {name:{w}} {ver:12} {eco:6} {lic}{mark}")
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as f:
+                  f.write(f"## {'❌' if blocking else '✅'} SBOM: лицензии зависимостей\n\n{by_role}\n\n"
+                          f"В продукте: {total}\n\n")
+                  f.write("| Роль | Уровень | Пакет | Версия | Лицензия |\n|---|---|---|---|---|\n")
+                  for level, name, ver, lic, eco, ok, role in rows:
+                      if level > LEVEL["LOW"]:
+                          f.write(f"| {role or '—'} | {NAME[level]} | {name} | {ver} | {lic} |\n")
+
+          if blocking:
+              print(f"\nОшибка: {len(blocking)} зависимост(ей) продукта уровня CRITICAL/HIGH. Заменить"
+                    f" зависимость или осознанно разрешить строкой в {ALLOW}: <пакет>[@версия]  # причина")
+              sys.exit(1)
+          PY
+
+      # Уязвимости: trivy сверяет версии из SBOM с базой уязвимостей. База качается
+      # при каждом прогоне (ghcr.io/aquasecurity/trivy-db); в закрытом контуре нужно
+      # её зеркало в локальном registry — переменная TRIVY_DB_REPOSITORY (переменная
+      # репозитория/организации или env ниже). Если база недоступна, проверка
+      # пропускается с предупреждением, коммит не красится.
+      # Задача красная при CRITICAL/HIGH с исправленной версией у того, что входит
+      # в продукт; уязвимости build/dev/other-platform показываются, но не красят.
+      # Осознанно принять уязвимость — её ID строкой в .trivyignore в корне
+      # репозитория (можно с комментарием: # причина).
+      - name: Vulnerabilities
+        if: ${{ !cancelled() }}
+        env:
+          TRIVY_DB_REPOSITORY: ${{ vars.TRIVY_DB_REPOSITORY }}
+        run: |
+          [ -n "$TRIVY_DB_REPOSITORY" ] || unset TRIVY_DB_REPOSITORY
+          [ -f /tmp/sbom.cdx.json ] || { echo "SBOM не построен"; exit 1; }
+          if ! trivy sbom --scanners vuln --quiet --format json -o /tmp/vuln.json /tmp/sbom.cdx.json; then
+            echo "Предупреждение: база уязвимостей trivy недоступна — проверка пропущена"
+            exit 0
+          fi
+          python3 - /tmp/vuln.json /tmp/sbom.cdx.json <<'PY'
+          import json
+          import os
+          import sys
+
+          SEV = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
+          ROLES = ["runtime", "build", "dev", "other-platform"]
+          report = json.load(open(sys.argv[1]))
+          # Роль зависимости — из SBOM (свойство dependency:role, его пишет шаг SBOM).
+          role_of = {}
+          for c in json.load(open(sys.argv[2])).get("components", []):
+              for p in c.get("properties", []):
+                  if p.get("name") == "dependency:role":
+                      role_of[(c.get("name"), c.get("version"))] = p["value"]
+          vulns = [v for r in report.get("Results") or [] for v in r.get("Vulnerabilities") or []]
+          for v in vulns:
+              v["Role"] = role_of.get((v["PkgName"], v.get("InstalledVersion")))
+          # Сначала то, что входит в продукт; внутри роли — по уровню.
+          vulns.sort(key=lambda v: (ROLES.index(v["Role"]) if v["Role"] else 0,
+                                    SEV.index(v.get("Severity", "UNKNOWN")), v["PkgName"], v["VulnerabilityID"]))
+          # Ошибка — только для того, что входит в продукт (runtime или роль неизвестна).
+          blocking = [v for v in vulns if v.get("Severity") in ("CRITICAL", "HIGH") and v.get("FixedVersion")
+                      and v["Role"] in (None, "runtime")]
+          total = " · ".join(f"{k}: {sum(1 for v in vulns if v.get('Severity') == k)}" for k in SEV)
+
+          print(f"Уязвимостей: {len(vulns)} · {total}")
+          print("Ошибкой считаются только CRITICAL/HIGH с исправленной версией у того, что входит в продукт.\n")
+          if vulns:
+              w = max(len(v["PkgName"]) for v in vulns)
+              print(f"{'Роль':14} {'Уровень':9} {'Пакет':{w}} {'Версия':12} {'Исправлено в':16} {'ID':20} Описание")
+              for v in vulns:
+                  print(f"{v['Role'] or '—':14} {v.get('Severity', ''):9} {v['PkgName']:{w}} {v.get('InstalledVersion', ''):12} "
+                        f"{v.get('FixedVersion') or '—':16} {v['VulnerabilityID']:20} {v.get('Title', '')}")
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as f:
+                  f.write(f"## {'❌' if blocking else '✅'} Уязвимости зависимостей\n\n{total}\n\n")
+                  if vulns:
+                      f.write("| Роль | Уровень | Пакет | Версия | Исправлено в | ID |\n|---|---|---|---|---|---|\n")
+                      for v in vulns:
+                          f.write(f"| {v['Role'] or '—'} | {v.get('Severity')} | {v['PkgName']} | {v.get('InstalledVersion')} | "
+                                  f"{v.get('FixedVersion') or '—'} | {v['VulnerabilityID']} |\n")
+
+          if blocking:
+              print(f"\nОшибка: {len(blocking)} уязвимост(ей) CRITICAL/HIGH с исправленной версией в продукте."
+                    " Обновить зависимость или осознанно принять: ID строкой в .trivyignore")
+              sys.exit(1)
+          PY

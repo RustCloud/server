@@ -1,0 +1,30 @@
+# Builds the plugin and its archive for Administration → Plugins → Install.
+# GitHub Actions (Forgejo Actions run it too); needs only Rust and crates.io.
+name: Build
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust for WebAssembly
+        run: |
+          command -v rustup >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          . "$HOME/.cargo/env" 2>/dev/null || true
+          rustup target add wasm32-wasip2
+      - name: Build
+        run: |
+          . "$HOME/.cargo/env" 2>/dev/null || true
+          cargo build --release --locked --target wasm32-wasip2
+      - name: Archive
+        run: |
+          id=$(sed -n 's/^id = "\(.*\)"/\1/p' manifest.toml)
+          mkdir -p "dist/$id"
+          cp manifest.toml "dist/$id/"
+          cp "target/wasm32-wasip2/release/$(echo "$id" | tr - _).wasm" "dist/$id/app.wasm"
+          (cd dist && zip -qr "$id.zip" "$id")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin
+          path: dist/*.zip

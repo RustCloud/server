@@ -1,0 +1,103 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental builds don't help a fresh checkout and take gigabytes of disk.
+  CARGO_INCREMENTAL: "0"
+  # Debug info is most of target/; backtraces still name the functions.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, tests on SQLite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tests build a WASM test app, so the wasm32-wasip2 target is needed too.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # The WASM apps shipped with the server (apps/) are crates of their own;
+      # one target folder for all of them, so shared dependencies build once.
+      - name: Apps (fmt, clippy, tests)
+        run: |
+          export CARGO_TARGET_DIR="$PWD/target/apps"
+          for dir in apps/*/; do
+            (cd "$dir" && cargo fmt -- --check \
+              && cargo clippy --release --target wasm32-wasip2 --locked -- -D warnings \
+              && cargo test --locked)
+          done
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  postgres:
+    name: Rust tests on PostgreSQL
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          # Throwaway CI database: no password needed.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      # Every test creates its own database on this server.
+      RUSTCLOUD_TEST_POSTGRES: postgres://postgres@localhost/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  web:
+    name: Web UI (svelte-check, tests, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Check, test and build
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run check
+          npm test
+          npm run build

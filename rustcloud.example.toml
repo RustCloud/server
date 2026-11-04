@@ -1,0 +1,99 @@
+# RustCloud configuration. Every setting is optional; the values below are the defaults.
+#
+# Top-level keys are read at startup. Tables ([server], [accounts], [files]) can
+# also be changed on the admin page, which writes them back to this file and keeps
+# your comments. If a change there locks you out, fix this file and restart.
+#
+# Environment variables win over the file: RUSTCLOUD_<KEY> for top-level keys
+# (RUSTCLOUD_DATABASE_URL), RUSTCLOUD_<TABLE>__<KEY> for tables
+# (RUSTCLOUD_SERVER__PUBLIC_URL). Such settings are read-only on the admin page.
+# Unknown settings are an error (typos are not ignored).
+
+# Address and port to listen on.
+listen = "0.0.0.0:8080"
+
+# Database: SQLite (a single file) or PostgreSQL.
+database_url = "sqlite://data/rustcloud.db?mode=rwc"
+# database_url = "postgres://rustcloud:password@localhost/rustcloud"
+
+# Where file contents are stored (in data_dir/files).
+data_dir = "data"
+
+# Log level, e.g. "info" or "rustcloud_files=debug,info". RUST_LOG overrides it.
+log = "info"
+
+[server]
+# The address users open in the browser, e.g. "https://cloud.example.com".
+# Public links are built from it (when empty, from the address the browser is
+# on). With https:// the session cookie is marked Secure (unless a trusted proxy
+# reports plain HTTP in X-Forwarded-Proto).
+public_url = ""
+
+# Other addresses the server is reached at, e.g. a LAN address.
+other_urls = []
+
+# Refuse requests to any other host name (localhost always works).
+only_listed_urls = false
+
+# Other web sites allowed to call the API from a browser (CORS), e.g.
+# "https://app.example.com". They log in with tokens; cookies are never shared.
+cors_origins = []
+
+# Reverse proxies (addresses or networks) whose X-Forwarded-For and
+# X-Forwarded-Proto headers are trusted, e.g. ["127.0.0.1", "172.16.0.0/12"].
+trusted_proxies = []
+
+[accounts]
+# Anyone may create an account. The very first account can always be created
+# and becomes the administrator; after that, admins create accounts.
+open_registration = false
+
+# How long a login lasts, in days.
+session_days = 14
+
+# Storage limit for new accounts, in MiB. Omit for unlimited.
+# default_quota_mib = 10240
+
+# Failed logins allowed per account within 15 minutes (per IP address: five times more).
+max_login_failures = 10
+
+[files]
+# Largest file that can be uploaded, in MiB. Omit for unlimited.
+# max_upload_mib = 4096
+# Days deleted files stay in the trash before they are removed for good; 0 keeps them.
+trash_days = 30
+# Earlier versions of a file: the latest versions_keep stay in any case, and also all
+# from the last versions_days days. Both 0 turn versions off.
+versions_keep = 10
+versions_days = 30
+
+[plugins]
+# Batches of background jobs of plugins that run at a time on the whole server;
+# 0 means half the processor cores. Takes effect after a restart.
+workers = 0
+# The most memory one plugin gets, as a multiple of 64 MiB (1, 2, 4, 8, 16, 32,
+# 64), whatever its manifest or Administration → Plugins asks for.
+max_memory = 16
+
+[media]
+# use.ffmpeg: ffmpeg the server runs for plugins the administrator approved it
+# for, in a sandbox. Needs media_tools_dir (the Docker image has it).
+enabled = true
+workers = 0          # processes at a time; 0: half the processor cores
+memory_mib = 1024
+time_seconds = 30
+max_megapixels = 200
+
+[onnx]
+# use.onnx: neural networks (ONNX models from a plugin's storage) the server
+# runs for plugins the administrator approved it for, each in a sandbox.
+enabled = true
+workers = 4                # models loaded at once, each in a process of its own
+memory_mib = 2048          # memory of one model's process
+time_seconds = 60          # one run, or loading a model
+keep_loaded_seconds = 300  # a model stays loaded this long after its last run
+max_model_mib = 1024
+
+[journal]
+# The activity log (Administration → Journal) keeps entries this many days.
+keep_days = 90
