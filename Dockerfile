@@ -42,12 +42,12 @@ RUN for dir in apps/*/; do \
 
 # 4. Tools of the media engine: our own static ffmpeg and ffprobe, only with what
 #    the engine uses (see docker/build-ffmpeg.sh). Cached unless the script changes.
-FROM alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f AS media
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS media
 COPY docker/build-ffmpeg.sh /build-ffmpeg.sh
 RUN PREFIX=/opt/ffmpeg sh /build-ffmpeg.sh
 
 # 5. Runtime
-FROM alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 RUN adduser -D -H -u 10001 rustcloud && mkdir /data && chown rustcloud /data
 COPY --from=server /rustcloud /usr/local/bin/rustcloud
