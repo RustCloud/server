@@ -4,7 +4,8 @@
 //!
 //! The plugin uses it through its `storage` import; files of its manifest's
 //! `[[downloads]]` are put here by [`Plugins`](crate::plugins::Plugins). The
-//! administrator sees the size and can clear it. There is no size limit yet.
+//! administrator sees the size and can clear it. There is no size limit
+//! per plugin yet; it never takes the disk's last [`DISK_RESERVE`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,6 +22,9 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+/// Free space a plugin's storage always leaves on the disk.
+const DISK_RESERVE: u64 = 1 << 30;
 
 /// How much a plugin keeps in its storage.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -62,12 +66,23 @@ impl PluginStorage {
         progress: impl Fn(u64) + Send + Sync + 'static,
     ) -> Result<StoredFile> {
         check_path(path)?;
+        let room = self.blobs.capacity().await?.map(|disk| disk.free_bytes.saturating_sub(DISK_RESERVE));
         let hasher = Arc::new(Mutex::new(Sha256::new()));
         let received = Arc::new(AtomicU64::new(0));
         let (counting, hashing) = (received.clone(), hasher.clone());
-        let data = data.inspect_ok(move |chunk| {
-            hashing.lock().unwrap_or_else(|e| e.into_inner()).update(chunk);
-            progress(counting.fetch_add(chunk.len() as u64, Ordering::Relaxed) + chunk.len() as u64);
+        let data = data.and_then(move |chunk| {
+            hashing.lock().unwrap_or_else(|e| e.into_inner()).update(&chunk);
+            let so_far = counting.fetch_add(chunk.len() as u64, Ordering::Relaxed) + chunk.len() as u64;
+            progress(so_far);
+            let full = room.is_some_and(|room| so_far > room);
+            futures_util::future::ready(match full {
+                true => Err(std::io::Error::other(Error::new(
+                    rustcloud_core::ErrorKind::PayloadTooLarge,
+                    "STORAGE_FULL",
+                    "The server's storage is full",
+                ))),
+                false => Ok(chunk),
+            })
         });
         let key = Uuid::new_v4().to_string();
         let size = self.blobs.put(&key, Box::pin(data)).await?;

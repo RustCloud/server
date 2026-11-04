@@ -1,10 +1,9 @@
 //! `rustcloud` — runs the server.
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
-use rustcloud_server::{app, journal, AppState, Config, StartupResult};
+use rustcloud_server::{app, journal, listen, AppState, Config, StartupResult};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
@@ -57,9 +56,8 @@ async fn serve() -> StartupResult<()> {
         config.file.display()
     );
 
-    // Connection info gives the network layer the peer address (see `network::guard`).
-    let service = app(state).into_make_service_with_connect_info::<SocketAddr>();
-    axum::serve(listener, service).with_graceful_shutdown(shutdown_signal()).await?;
+    // Each request gets the peer address (see `network::guard`).
+    listen::serve(listener, app(state), shutdown_signal()).await;
     tracing::info!("stopped");
     Ok(())
 }

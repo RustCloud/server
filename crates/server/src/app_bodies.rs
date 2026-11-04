@@ -16,6 +16,9 @@ use rustcloud_core::{ByteStream, Error, ErrorKind, Result};
 use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
 
+/// How long a body may pause before the request is given up.
+const BODY_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The body of a request to an app.
 pub enum RequestBody {
     /// Given to the app.
@@ -37,8 +40,8 @@ impl RequestBody {
     pub async fn receive(body: Body, in_memory: usize, keep: Option<Keep<'_>>) -> Result<Self> {
         let mut chunks = body.into_data_stream();
         let mut memory = Vec::new();
-        while let Some(chunk) = chunks.next().await {
-            let chunk = chunk.map_err(|err| Error::bad_request("BAD_BODY", err.to_string()))?;
+        while let Some(chunk) = next_chunk(&mut chunks).await {
+            let chunk = chunk?;
             if memory.len() + chunk.len() <= in_memory {
                 memory.extend_from_slice(&chunk);
                 continue;
@@ -54,9 +57,8 @@ impl RequestBody {
             for chunk in [Bytes::from(memory), chunk] {
                 size = write_kept(&mut out, &chunk, size, keep.max).await?;
             }
-            while let Some(chunk) = chunks.next().await {
-                let chunk = chunk.map_err(|err| Error::bad_request("BAD_BODY", err.to_string()))?;
-                size = write_kept(&mut out, &chunk, size, keep.max).await?;
+            while let Some(chunk) = next_chunk(&mut chunks).await {
+                size = write_kept(&mut out, &chunk?, size, keep.max).await?;
             }
             out.flush().await.map_err(Error::internal)?;
             return Ok(Self::Kept { file, size });
@@ -92,6 +94,14 @@ impl RequestBody {
                 Ok(Box::pin(tokio_util::io::ReaderStream::new(file)))
             }
         }
+    }
+}
+
+/// The next piece of a body; an error if none comes for [`BODY_IDLE`].
+async fn next_chunk(chunks: &mut axum::body::BodyDataStream) -> Option<Result<Bytes>> {
+    match tokio::time::timeout(BODY_IDLE, chunks.next()).await {
+        Ok(chunk) => chunk.map(|chunk| chunk.map_err(|err| Error::bad_request("BAD_BODY", err.to_string()))),
+        Err(_) => Some(Err(Error::bad_request("BODY_TIMEOUT", "The request body stopped coming"))),
     }
 }
 

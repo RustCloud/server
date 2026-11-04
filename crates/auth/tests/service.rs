@@ -101,7 +101,7 @@ async fn disabled_users_cannot_log_in_and_lose_their_sessions() {
 
     assert!(auth.session_user(&session.token).await.unwrap().is_none());
     let err = auth.login("password", "alice", "password123", None).await.unwrap_err();
-    assert_eq!(err.code, "ACCOUNT_DISABLED");
+    assert_eq!(err.code, "INVALID_CREDENTIALS", "like a wrong password: no hint the password was right");
 }
 
 #[tokio::test]
@@ -179,6 +179,17 @@ async fn repeated_failures_block_logins_for_that_account() {
     }
     let err = auth.login("password", "alice", "password123", None).await.unwrap_err();
     assert_eq!(err.code, "TOO_MANY_ATTEMPTS", "even the right password is refused while blocked");
+}
+
+#[tokio::test]
+async fn a_burst_of_attempts_at_once_is_held_to_the_limit() {
+    let (_db, auth) = auth_with(AccountSettings { max_login_failures: 3, ..Default::default() }).await;
+    auth.create_user(account("alice"), false).await.unwrap();
+
+    let attempts = (0..10).map(|_| auth.login("password", "alice", "wrong-password", None));
+    let results = futures_util::future::join_all(attempts).await;
+    let checked = results.iter().filter(|r| r.as_ref().is_err_and(|e| e.code == "INVALID_CREDENTIALS")).count();
+    assert_eq!(checked, 3, "only as many passwords are checked as the limit allows");
 }
 
 #[tokio::test]
@@ -271,13 +282,23 @@ async fn app_passwords_are_validated() {
 }
 
 #[tokio::test]
-async fn guessing_app_passwords_is_blocked_like_logins() {
-    let (_db, auth) = auth_with(AccountSettings { max_login_failures: 3, ..Default::default() }).await;
+async fn guessing_app_passwords_blocks_the_guesser_not_the_account() {
+    let (_db, auth) = auth_with(AccountSettings { max_login_failures: 1, ..Default::default() }).await;
     let alice = auth.create_user(account("alice"), false).await.unwrap();
     let created = auth.create_app_password(&alice, calendar_password(Access::Read)).await.unwrap();
-    for _ in 0..3 {
-        assert!(auth.app_password_user("alice", "guess", None).await.unwrap().is_none());
+    let attacker = Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+    let phone = Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)));
+    let mut blocked = false;
+    for _ in 0..20 {
+        match auth.app_password_user("alice", "guess", attacker).await {
+            Ok(found) => assert!(found.is_none()),
+            Err(err) => {
+                assert_eq!(err.code, "TOO_MANY_ATTEMPTS");
+                blocked = true;
+                break;
+            }
+        }
     }
-    let err = auth.app_password_user("alice", &created.password, None).await.unwrap_err();
-    assert_eq!(err.code, "TOO_MANY_ATTEMPTS");
+    assert!(blocked, "the guessing address is blocked");
+    assert!(auth.app_password_user("alice", &created.password, phone).await.unwrap().is_some(), "alice's phone isn't");
 }

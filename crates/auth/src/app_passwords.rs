@@ -146,13 +146,15 @@ impl Auth {
         password: &str,
         ip: Option<IpAddr>,
     ) -> Result<Option<AppPasswordUser>> {
+        // Only per address, not per account: an app password is a long random
+        // token nobody can guess, and failures counted per account would let
+        // anyone lock the user's phone and calendar out of the account.
         let max_failures = self.settings.read(|s| s.max_login_failures);
-        let account_key = format!("app-password:{}", username.trim().to_ascii_lowercase());
         let ip_key = ip.map(|ip| format!("ip:{ip}"));
         let ip_allowed = ip_key
             .as_deref()
             .is_none_or(|key| self.limiter.is_allowed(key, max_failures.saturating_mul(IP_FAILURE_FACTOR)));
-        if !ip_allowed || !self.limiter.is_allowed(&account_key, max_failures) {
+        if !ip_allowed {
             return Err(Error::new(
                 ErrorKind::TooManyRequests,
                 "TOO_MANY_ATTEMPTS",
@@ -172,7 +174,6 @@ impl Auth {
         else {
             let ip = ip.map(|ip| ip.to_string());
             audit!(warn, "auth.login_failed", user = username, ip, method = "app-password", "failed login");
-            self.limiter.record_failure(&account_key);
             if let Some(key) = &ip_key {
                 self.limiter.record_failure(key);
             }
@@ -181,7 +182,6 @@ impl Auth {
         if user.disabled {
             return Ok(None);
         }
-        self.limiter.record_success(&account_key);
 
         let password_id = row.id;
         let scopes = parse_scopes(&row.scopes)?;

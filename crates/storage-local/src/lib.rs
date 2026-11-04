@@ -122,6 +122,8 @@ impl BlobStore for LocalBlobStore {
     }
 
     async fn copy(&self, from: &str, to: &str) -> Result<()> {
+        // Checked before anything is written: the temporary path is built from it.
+        self.blob_path(to)?;
         let tmp = self.tmp_path(to);
         if let Err(err) = fs::copy(self.blob_path(from)?, &tmp).await {
             let _ = fs::remove_file(&tmp).await;

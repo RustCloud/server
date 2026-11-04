@@ -107,6 +107,8 @@ struct Claims {
     /// A stream of the video, not the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     m: Option<StreamMode>,
+    /// Until when the link works, in Unix seconds.
+    x: i64,
 }
 
 /// What an upload link's token holds. Its fields differ from [`Claims`], so
@@ -150,6 +152,18 @@ struct ReplaceClaims {
 
 /// How long an upload link waits for its upload to start, in seconds.
 pub const UPLOAD_WITHIN: i64 = 15 * 60;
+
+/// How long a link to a file works at least, in seconds (also while the
+/// session lives on): a link that leaked doesn't stay good for days. It
+/// ends at a full hour, so all links made within an hour are the same and
+/// the browser's cache keeps working.
+pub const LINK_LIFETIME: i64 = 12 * 60 * 60;
+
+/// When a link made now ends: 12 to 13 hours on, at a full hour.
+fn link_end() -> i64 {
+    let hour = 60 * 60;
+    (Utc::now().timestamp() / hour + 1) * hour + LINK_LIFETIME
+}
 
 /// Videos remembered at most: their pieces and init segments.
 const STREAMS_KEPT: usize = 256;
@@ -221,7 +235,8 @@ impl AppLinks {
         let target = Target::from_wit(target)?;
         let file = self.file(Some(user), app_id, &target).await?;
         let e = file.etag.clone().unwrap_or_default();
-        let claims = Claims { s: session, a: app_id.to_owned(), t: target, e, m: mode };
+        let x = link_end();
+        let claims = Claims { s: session, a: app_id.to_owned(), t: target, e, m: mode, x };
         Ok((format!("/api/v1/app-links/{}", self.token(&claims)?), file))
     }
 
@@ -428,6 +443,9 @@ fn gone() -> Error {
 /// session alive, the plugin running, the file readable and that version.
 async fn check(state: &AppState, token: &str) -> Result<(Claims, User)> {
     let claims: Claims = state.links.open(token).ok_or_else(gone)?;
+    if claims.x < Utc::now().timestamp() {
+        return Err(gone());
+    }
     let session = state.auth.session_by_id(claims.s).await?.ok_or_else(gone)?;
     if state.plugins.get(&claims.a).is_none() {
         return Err(gone());
@@ -567,7 +585,7 @@ mod tests {
     #[test]
     fn upload_tokens_and_file_tokens_never_pass_for_each_other() {
         let (s, a) = (Uuid::new_v4(), "photos".to_owned());
-        let file = Claims { s, a: a.clone(), t: Target::File(Uuid::new_v4()), e: "etag".into(), m: None };
+        let file = Claims { s, a: a.clone(), t: Target::File(Uuid::new_v4()), e: "etag".into(), m: None, x: 0 };
         let upload = UploadClaims { s, a, f: Uuid::new_v4(), n: "a.jpg".into(), o: true, x: 0, r: 7 };
         let file = serde_json::to_vec(&file).unwrap();
         let upload = serde_json::to_vec(&upload).unwrap();

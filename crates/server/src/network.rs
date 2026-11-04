@@ -3,6 +3,7 @@
 //! proxies, and which other web sites may call the API (CORS).
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -217,9 +218,17 @@ pub async fn guard(State(state): State<GuardState>, mut request: Request, next: 
         .or_else(|| request.uri().authority().cloned());
     let peer = request.extensions().get::<ConnectInfo<SocketAddr>>().map(|info| info.0.ip());
 
-    let (listed, client) = state.settings.read(|settings| {
+    let (listed, client, https_site) = state.settings.read(|settings| {
         let listed = host.as_ref().is_none_or(|host| settings.accepts_host(host));
-        (listed, settings.client_info(peer, request.headers()))
+        let proxied =
+            request.headers().contains_key(X_FORWARDED_FOR) || request.headers().contains_key(X_FORWARDED_PROTO);
+        if proxied && settings.trusted_proxies.is_empty() && !WARNED_ABOUT_PROXY.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "requests come through a proxy, but [server] trusted_proxies is empty: client addresses and \
+                 https are not known (add the proxy's address)"
+            );
+        }
+        (listed, settings.client_info(peer, request.headers()), settings.public_url.starts_with("https://"))
     });
     // A service of a plugin calling it back by the server's inner address.
     let inner = host.as_ref().is_some_and(|host| state.inner_hosts.allow(peer, host, request.uri().path()));
@@ -232,8 +241,20 @@ pub async fn guard(State(state): State<GuardState>, mut request: Request, next: 
     // address from this span, and the user once `CurrentUser` records it.
     let ip = client.ip.map(|ip| ip.to_string()).unwrap_or_default();
     let span = tracing::info_span!("client", ip, user = tracing::field::Empty);
-    next.run(request).instrument(span).await
+    let mut response = next.run(request).instrument(span).await;
+    // A site that is https says so for good: browsers then never fall back
+    // to http for it (where cookies could be read on the way).
+    if https_site && client.https {
+        response.headers_mut().insert(header::STRICT_TRANSPORT_SECURITY, HeaderValue::from_static(HSTS));
+    }
+    response
 }
+
+/// `Strict-Transport-Security` of an https site: half a year, this host only.
+const HSTS: &str = "max-age=15552000";
+
+/// Whether the warning about a proxy that isn't trusted was logged already.
+static WARNED_ABOUT_PROXY: AtomicBool = AtomicBool::new(false);
 
 /// CORS for the origins in the settings, read on every request. Credentials
 /// (cookies) are never allowed cross-origin; the `X-Requested-With` header

@@ -1,18 +1,36 @@
 //! Password hashing and session tokens.
 
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use rustcloud_core::{Error, Result};
+use rustcloud_core::{Error, ErrorKind, Result};
 use sha2::{Digest, Sha256};
+
+/// Argon2 runs at once: each takes 19 MiB and a core, so a flood of logins
+/// must not start hundreds of them. One per core.
+static HASHING: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(std::thread::available_parallelism().map_or(2, |n| n.get()).max(2)));
+
+/// How long a login waits for its turn before it is turned away with 429.
+const HASHING_WAIT: Duration = Duration::from_secs(3);
+
+/// A turn to run Argon2; `SERVER_BUSY` when none is free in time.
+async fn hashing_turn() -> Result<tokio::sync::SemaphorePermit<'static>> {
+    match tokio::time::timeout(HASHING_WAIT, HASHING.acquire()).await {
+        Ok(Ok(turn)) => Ok(turn),
+        _ => Err(Error::new(ErrorKind::TooManyRequests, "SERVER_BUSY", "The server is busy, try again in a moment")),
+    }
+}
 
 /// Hashes a password with Argon2id (default parameters: 19 MiB, 2 passes),
 /// on a blocking thread so the async runtime is not stalled.
 pub async fn hash_password(password: &str) -> Result<String> {
     let password = password.to_owned();
+    let _turn = hashing_turn().await?;
     tokio::task::spawn_blocking(move || {
         let salt = SaltString::encode_b64(&rand::random::<[u8; 16]>()).map_err(Error::internal)?;
         let hash = Argon2::default().hash_password(password.as_bytes(), &salt).map_err(Error::internal)?;
@@ -30,6 +48,7 @@ pub async fn hash_password(password: &str) -> Result<String> {
 pub async fn verify_password(password: &str, hash: Option<&str>) -> Result<bool> {
     let password = password.to_owned();
     let hash = hash.map(str::to_owned);
+    let _turn = hashing_turn().await?;
     tokio::task::spawn_blocking(move || {
         let Some(hash) = hash else {
             let dummy = PasswordHash::new(&DUMMY_HASH).map_err(Error::internal)?;

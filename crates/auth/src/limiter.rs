@@ -44,6 +44,16 @@ impl AttemptLimiter {
         entry.count += 1;
     }
 
+    /// Takes back one failure of `key`: attempts are counted as failures
+    /// before they are checked (so a burst of them at once is held back
+    /// too), and one that succeeded wasn't.
+    pub fn forgive(&self, key: &str) {
+        let mut failures = self.failures.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = failures.get_mut(key) {
+            entry.count = entry.count.saturating_sub(1);
+        }
+    }
+
     /// Clears the failures of `key` after a successful attempt.
     pub fn record_success(&self, key: &str) {
         let mut failures = self.failures.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

@@ -15,6 +15,7 @@ pub mod apps;
 pub mod config;
 mod grants;
 pub mod journal;
+pub mod listen;
 pub mod network;
 mod plugin_jobs;
 mod plugin_storage;

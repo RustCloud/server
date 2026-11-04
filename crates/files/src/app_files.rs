@@ -12,7 +12,9 @@ use rustcloud_core::{audit, validate, ByteRange, ByteStream, Error, Result};
 use rustcloud_db::node;
 use uuid::Uuid;
 
+use crate::appdata::APPDATA_FOLDER;
 use crate::events::FileEventKind;
+use crate::grants::Reach;
 use crate::service::{Download, Files, Node, Writer};
 
 impl Files {
@@ -41,8 +43,9 @@ impl Files {
         }
         let mut children = Vec::new();
         for child in self.child_rows(folder.id).await? {
-            // The trash is the user's own.
-            if !self.is_trash_folder(&child).await? {
+            // The trash and the apps' data are the user's own.
+            let appdata = folder.parent_id.is_none() && child.is_dir && child.name == APPDATA_FOLDER;
+            if !appdata && !self.is_trash_folder(&child).await? {
                 children.push(Node::from(child));
             }
         }
@@ -239,6 +242,7 @@ impl Files {
     /// Moves a file or folder inside a granted folder to the trash. The
     /// granted folder itself can't be deleted by the app.
     pub async fn app_delete(&self, user: &User, app_id: &str, id: Uuid) -> Result<()> {
+        let _moving = self.moving.lock().await;
         let node = self.app_node(user, app_id, id, true).await?;
         if self.app_granted(user, app_id).await?.iter().any(|granted| granted.id == node.id) {
             return Err(Error::forbidden("An app can't delete what it was given access to").with_code("READ_ONLY"));
@@ -264,11 +268,12 @@ impl Files {
     /// A node the app may read (and with `write`, change). Nodes outside the
     /// app's access are missing; read-only access to a change is `READ_ONLY`.
     pub(crate) async fn app_node(&self, user: &User, app_id: &str, id: Uuid, write: bool) -> Result<node::Model> {
-        if !self.app_may_access(user, app_id, id, false).await? {
-            return Err(Error::not_found("FILE_NOT_FOUND", "File not found"));
-        }
-        if write && !self.app_may_access(user, app_id, id, true).await? {
-            return Err(Error::forbidden("The app may only read this").with_code("READ_ONLY"));
+        match self.app_reach(user, app_id, id).await? {
+            Reach::None => return Err(Error::not_found("FILE_NOT_FOUND", "File not found")),
+            Reach::Read if write => {
+                return Err(Error::forbidden("The app may only read this").with_code("READ_ONLY"));
+            }
+            Reach::Read | Reach::Write => {}
         }
         self.accessible(user, id).await
     }

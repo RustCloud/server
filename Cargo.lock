@@ -3332,6 +3332,7 @@ dependencies = [
  "axum-extra",
  "base64 0.22.1",
  "chrono",
+ "futures-util",
  "rand 0.9.5",
  "rustcloud-core",
  "rustcloud-db",

@@ -216,18 +216,29 @@ impl Auth {
             ));
         }
 
+        // Counted as failed before the check: a burst of attempts at once
+        // can't all slip past the limit. Taken back if it succeeds.
+        self.limiter.record_failure(&account_key);
+        if let Some(key) = &ip_key {
+            self.limiter.record_failure(key);
+        }
+        let wrong = || Error::unauthorized("Wrong username or password").with_code("INVALID_CREDENTIALS");
         let Some(identity) = provider.verify(login, secret).await? else {
             // Logged with the address, so tools like fail2ban can act on it.
             let ip = ip.map(|ip| ip.to_string());
             audit!(warn, "auth.login_failed", user = login, ip, "failed login");
-            self.limiter.record_failure(&account_key);
-            if let Some(key) = &ip_key {
-                self.limiter.record_failure(key);
-            }
-            return Err(Error::unauthorized("Wrong username or password").with_code("INVALID_CREDENTIALS"));
+            return Err(wrong());
         };
         self.limiter.record_success(&account_key);
-        let session = self.sign_in(&identity).await?;
+        if let Some(key) = &ip_key {
+            self.limiter.forgive(key);
+        }
+        // A disabled account answers like a wrong password: whether the
+        // password was right would help someone who is guessing it.
+        let session = match self.sign_in(&identity).await {
+            Err(err) if err.code == "ACCOUNT_DISABLED" => return Err(wrong()),
+            other => other?,
+        };
         let ip = ip.map(|ip| ip.to_string());
         audit!("auth.login", user = session.user.username, ip, method = provider.name(), "logged in");
         Ok(session)
@@ -329,11 +340,23 @@ impl Auth {
 
     /// Changes the caller's own password after checking the current one.
     /// All other sessions of the user are ended.
+    /// Wrong current passwords count like failed logins, so a stolen session
+    /// can't be used to guess the password.
     pub async fn change_password(&self, user: &SessionUser, current: &str, new: &str) -> Result<()> {
+        let key = format!("password-change:{}", user.user.id);
+        if !self.limiter.is_allowed(&key, self.settings.read(|s| s.max_login_failures)) {
+            return Err(Error::new(
+                ErrorKind::TooManyRequests,
+                "TOO_MANY_ATTEMPTS",
+                "Too many wrong passwords, try again later",
+            ));
+        }
+        self.limiter.record_failure(&key);
         let confirmed = self.passwords.verify(&user.user.username, current).await?;
         if confirmed.is_none() {
             return Err(Error::bad_request("WRONG_PASSWORD", "The current password is wrong"));
         }
+        self.limiter.record_success(&key);
         validate::password(new)?;
         self.passwords.set_password(&self.db, user.user.id, &user.user.username, new).await?;
         session::Entity::delete_many()

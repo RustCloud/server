@@ -388,7 +388,13 @@ async fn apps_reach_only_the_addresses_of_their_manifest() {
     assert_eq!(fetch(rules(&[&local]), "/hello").await, "hi, Bearer secret");
     assert_eq!(fetch(rules(&[&local]), "/here").await, "hi, Bearer secret", "a redirect on the same host");
     assert_eq!(fetch(rules(&[&local]), "/away").await, "Error::NotAllowed", "a redirect elsewhere");
-    assert_eq!(fetch(rules(&[&local, &localhost]), "/away").await, "hi, no key", "the key stays home");
+    // A name of the manifest that leads to this machine (its DNS could say anything) is not reached…
+    let refused = fetch(rules(&[&local, &localhost]), "/away").await;
+    assert!(refused.starts_with("Error::Failed") && refused.contains("private"), "{refused}");
+    // …the same address set by the administrator is.
+    let mut set = rules(&[&local]);
+    set.network.push(NetworkRule::from_url(&localhost).unwrap());
+    assert_eq!(fetch(set, "/away").await, "hi, no key", "the key stays home");
     assert_eq!(fetch(rules(&[&local]), "/big").await, "Error::TooLarge");
 }
 

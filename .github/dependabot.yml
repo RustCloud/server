@@ -1,0 +1,12 @@
+# Keeps the pinned versions fresh: base images (pinned by digest in the
+# Dockerfile) and GitHub Actions (pinned by commit SHA).
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

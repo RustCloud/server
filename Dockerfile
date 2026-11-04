@@ -8,7 +8,7 @@
 # RUSTCLOUD_DATABASE_URL for PostgreSQL (see compose.yml).
 
 # 1. Web UI
-FROM node:24-alpine AS web
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -16,7 +16,7 @@ COPY web/ ./
 RUN npm run build
 
 # 2. Server (static musl binary; the UI from stage 1 is embedded at compile time)
-FROM clux/muslrust:stable AS server
+FROM clux/muslrust:stable@sha256:12e02bbe193e3bd9255f9b5a9312f0039a0c79b9e015cf5e81eeab83a1eb8e0f AS server
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
@@ -28,7 +28,7 @@ RUN cargo build --release --locked -p rustcloud-server \
  && cp target/x86_64-unknown-linux-musl/release/rustcloud /rustcloud
 
 # 3. Apps shipped with the server (WebAssembly components, see apps/)
-FROM clux/muslrust:stable AS apps
+FROM clux/muslrust:stable@sha256:12e02bbe193e3bd9255f9b5a9312f0039a0c79b9e015cf5e81eeab83a1eb8e0f AS apps
 RUN rustup target add wasm32-wasip2
 WORKDIR /src
 COPY crates/plugin-api/wit crates/plugin-api/wit
@@ -42,12 +42,12 @@ RUN for dir in apps/*/; do \
 
 # 4. Tools of the media engine: our own static ffmpeg and ffprobe, only with what
 #    the engine uses (see docker/build-ffmpeg.sh). Cached unless the script changes.
-FROM alpine:3.22 AS media
+FROM alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f AS media
 COPY docker/build-ffmpeg.sh /build-ffmpeg.sh
 RUN PREFIX=/opt/ffmpeg sh /build-ffmpeg.sh
 
 # 5. Runtime
-FROM alpine:3
+FROM alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 RUN adduser -D -H -u 10001 rustcloud && mkdir /data && chown rustcloud /data
 COPY --from=server /rustcloud /usr/local/bin/rustcloud

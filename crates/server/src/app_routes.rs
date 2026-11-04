@@ -37,6 +37,48 @@ use crate::AppState;
 /// a unique origin, nothing with the cloud's own; be framed only by the cloud.
 const SANDBOX: &str = "sandbox allow-scripts allow-forms allow-downloads; frame-ancestors 'self'";
 
+/// The largest body of a request without a user: anyone may send those.
+const ANONYMOUS_BODY: usize = 256 << 10;
+
+/// Headers of an app's answer that reach the browser; `x-…` ones of its own
+/// too (but not those in [`FORBIDDEN_X`]). Anything else — `Clear-Site-Data`,
+/// `Strict-Transport-Security`, CORS, `Service-Worker-Allowed`, `Refresh`,
+/// `Link` — could act on the whole cloud, not just the app's page.
+const ANSWER_HEADERS: &[&str] = &[
+    "accept-ranges",
+    "allow",
+    "cache-control",
+    "content-disposition",
+    "content-encoding",
+    "content-language",
+    "content-length",
+    "content-location",
+    "content-range",
+    "content-type",
+    "dav",
+    "etag",
+    "expires",
+    "last-modified",
+    "location",
+    "lock-token",
+    "ms-author-via",
+    "pragma",
+    "preference-applied",
+    "retry-after",
+    "schedule-tag",
+    "vary",
+    "www-authenticate",
+];
+
+/// `x-…` headers an app may not set: the server's own say.
+const FORBIDDEN_X: &[&str] = &["x-frame-options", "x-content-type-options", "x-xss-protection"];
+
+/// Whether an app's answer may carry this header.
+fn answer_header_allowed(name: &HeaderName) -> bool {
+    let name = name.as_str();
+    ANSWER_HEADERS.contains(&name) || (name.starts_with("x-") && !FORBIDDEN_X.contains(&name))
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/app/{id}", any(app_root))
@@ -72,6 +114,10 @@ async fn forward(
     request: HttpRequest,
 ) -> Result<HttpResponse> {
     let (mut parts, body) = request.into_parts();
+    // A service worker would be the app's script working for the whole site.
+    if parts.headers.contains_key("service-worker") {
+        return Err(Error::forbidden("Apps can't install service workers").with_code("NO_SERVICE_WORKER"));
+    }
     let authorization = parts.headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
     let token = token_of(parts.uri.query(), authorization);
     let services = if let Some(token) = token {
@@ -81,6 +127,11 @@ async fn forward(
         }
     } else {
         match basic_credentials(&parts.headers) {
+            // A browser keeps Basic credentials it was given and sends them
+            // with requests other sites make: not for changes.
+            Some(_) if !reads_only(&parts.method) && from_a_web_page(&parts.headers) => {
+                return Err(Error::forbidden("App passwords don't work from web pages").with_code("CSRF_CHECK_FAILED"))
+            }
             Some((username, password)) => {
                 match app_password_services(state, client, id, &parts.method, &username, &password).await? {
                     Some(services) => Some(services),
@@ -115,11 +166,20 @@ async fn forward(
     // for a user who may change files.
     let mut config = state.plugins.config(id);
     config.self_url = state.proxy.self_url(&state.plugins, id).await;
-    let in_memory = usize::try_from(config.limits.data).unwrap_or(usize::MAX);
+    let mut in_memory = usize::try_from(config.limits.data).unwrap_or(usize::MAX);
+    if services.is_none() {
+        in_memory = in_memory.min(ANONYMOUS_BODY);
+    }
+    // A kept body goes into a file of the user's: at most what the user may
+    // still upload (the limit, the quota and the disk's free space).
     let large = state.plugins.get(id).is_some_and(|app| app.large_bodies);
-    let keep = (large && services.as_ref().is_some_and(|services| !services.read_only))
-        .then(|| Keep { dir: &state.links.bodies, max: state.files.max_upload_bytes() });
+    let keep = match services.as_ref().filter(|services| large && !services.read_only) {
+        Some(services) => Some(Keep { dir: &state.links.bodies, max: state.files.upload_room(&services.user).await? }),
+        None => None,
+    };
     let body = RequestBody::receive(body, in_memory, keep).await?;
+    // A token of another server reaches only its own file.
+    let token_file = services.as_ref().and_then(|services| services.token.as_ref().map(|token| token.f));
     let request = to_app_request(&parts.method, &parts.uri, &parts.headers, path, &body);
     let caller = services.map(|mut services| {
         services.body = Some(body);
@@ -129,6 +189,11 @@ async fn forward(
     let response = state.plugins.host().handle(id, caller, request, &config).await?;
     if let Some((_, send)) = response.headers.iter().find(|(name, _)| name.eq_ignore_ascii_case(SEND_HEADER)) {
         let target = Target::from_header(send)?;
+        if let (Target::File(file), Some(allowed)) = (&target, token_file) {
+            if *file != allowed {
+                return Err(Error::not_found("FILE_NOT_FOUND", "File not found"));
+            }
+        }
         let user = match user_id {
             Some(user_id) => Some(state.auth.find_user(user_id).await?),
             None => None,
@@ -243,6 +308,13 @@ async fn token_services(state: &AppState, id: &str, token: &str) -> Result<Optio
     Ok(Some(services))
 }
 
+/// Whether a browser sent the request for a web page: it says where the
+/// page came from. Calendar and contacts apps send neither header.
+fn from_a_web_page(headers: &HeaderMap) -> bool {
+    let site = headers.get("sec-fetch-site").and_then(|value| value.to_str().ok());
+    headers.contains_key(header::ORIGIN) || site.is_some_and(|site| site != "none")
+}
+
 /// Methods that only read, in HTTP and in WebDAV (CalDAV, CardDAV).
 fn reads_only(method: &Method) -> bool {
     matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS" | "PROPFIND" | "REPORT")
@@ -285,7 +357,7 @@ fn from_app_response(response: rustcloud_wasm_host::Response) -> HttpResponse {
         let (Ok(name), Ok(value)) = (HeaderName::try_from(name), HeaderValue::try_from(value)) else {
             continue;
         };
-        if name != header::SET_COOKIE && name != header::CONTENT_SECURITY_POLICY && name != header::X_FRAME_OPTIONS {
+        if answer_header_allowed(&name) {
             headers.append(name, value);
         }
     }
@@ -685,5 +757,46 @@ fn file_node(node: rustcloud_files::Node) -> FileNode {
         mime_type: node.mime_type,
         etag: node.etag,
         updated_at: node.updated_at.to_rfc3339(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_of_web_pages_are_told_apart_from_dav_clients() {
+        let headers = |pairs: &[(&str, &str)]| {
+            let mut map = HeaderMap::new();
+            for (name, value) in pairs {
+                map.insert(HeaderName::try_from(*name).unwrap(), HeaderValue::from_str(value).unwrap());
+            }
+            map
+        };
+        assert!(!from_a_web_page(&headers(&[("user-agent", "DAVx5"), ("content-type", "text/calendar")])));
+        assert!(!from_a_web_page(&headers(&[("sec-fetch-site", "none")])), "typed into the address bar");
+        assert!(from_a_web_page(&headers(&[("origin", "https://evil.example")])));
+        assert!(from_a_web_page(&headers(&[("sec-fetch-site", "cross-site")])));
+    }
+
+    #[test]
+    fn apps_answer_only_with_headers_for_their_own_pages() {
+        let allowed = |name: &str| answer_header_allowed(&HeaderName::try_from(name).unwrap());
+        for name in ["content-type", "etag", "dav", "location", "x-request-id", "cache-control"] {
+            assert!(allowed(name), "{name}");
+        }
+        for name in [
+            "set-cookie",
+            "content-security-policy",
+            "x-frame-options",
+            "clear-site-data",
+            "strict-transport-security",
+            "access-control-allow-origin",
+            "service-worker-allowed",
+            "refresh",
+            "link",
+        ] {
+            assert!(!allowed(name), "{name}");
+        }
     }
 }

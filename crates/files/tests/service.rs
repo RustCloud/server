@@ -179,6 +179,40 @@ async fn folders_cannot_be_moved_into_themselves() {
 }
 
 #[tokio::test]
+async fn two_folders_moved_into_each_other_at_once_make_no_loop() {
+    let s = setup().await;
+    let root = s.files.root(&s.alice).await.unwrap();
+    for round in 0..10 {
+        let a = s.files.create_folder(&s.alice, root.id, &format!("A{round}")).await.unwrap();
+        let b = s.files.create_folder(&s.alice, root.id, &format!("B{round}")).await.unwrap();
+        let (into_b, into_a) = tokio::join!(
+            s.files.update(&s.alice, a.id, NodeUpdate { name: None, parent_id: Some(b.id) }),
+            s.files.update(&s.alice, b.id, NodeUpdate { name: None, parent_id: Some(a.id) }),
+        );
+        assert!(into_b.is_ok() != into_a.is_ok(), "exactly one of the moves wins");
+        let lost = into_b.err().or(into_a.err()).unwrap();
+        assert_eq!(lost.code, "MOVE_INTO_ITSELF");
+    }
+}
+
+#[tokio::test]
+async fn a_loop_already_in_the_tree_fails_instead_of_hanging() {
+    let s = setup().await;
+    let root = s.files.root(&s.alice).await.unwrap();
+    let a = s.files.create_folder(&s.alice, root.id, "A").await.unwrap();
+    let b = s.files.create_folder(&s.alice, a.id, "B").await.unwrap();
+    // Made by hand, as a race in an older version could.
+    let mut row: node::ActiveModel = node::Entity::find_by_id(a.id).one(&s.db.conn).await.unwrap().unwrap().into();
+    row.parent_id = Set(Some(b.id));
+    row.update(&s.db.conn).await.unwrap();
+
+    let delete = tokio::time::timeout(std::time::Duration::from_secs(10), s.files.delete(&s.alice, a.id));
+    assert!(delete.await.expect("no endless walk").is_err());
+    let copy = tokio::time::timeout(std::time::Duration::from_secs(10), s.files.copy(&s.alice, b.id, root.id, None));
+    assert!(copy.await.expect("no endless walk").is_err());
+}
+
+#[tokio::test]
 async fn root_cannot_be_renamed_deleted_or_shared() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
@@ -370,6 +404,21 @@ async fn public_link_gives_read_access_to_a_folder_and_nothing_else() {
     assert!(s.files.public_view(&link.token, Some(root.id)).await.is_err());
 
     s.files.delete_share(&s.alice, link.id).await.unwrap();
+    assert_eq!(s.files.public_view(&link.token, None).await.unwrap_err().code, "SHARE_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn links_of_a_disabled_account_stop_working() {
+    let s = setup().await;
+    let root = s.files.root(&s.alice).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false).await.unwrap();
+    let link = s.files.create_share(&s.alice, file.id, None).await.unwrap();
+    assert!(s.files.public_view(&link.token, None).await.is_ok());
+
+    let mut alice: rustcloud_db::user::ActiveModel =
+        rustcloud_db::user::Entity::find_by_id(s.alice.id).one(&s.db.conn).await.unwrap().unwrap().into();
+    alice.disabled = Set(true);
+    alice.update(&s.db.conn).await.unwrap();
     assert_eq!(s.files.public_view(&link.token, None).await.unwrap_err().code, "SHARE_NOT_FOUND");
 }
 
@@ -628,6 +677,25 @@ async fn moving_tells_the_apps_of_both_places_and_nobody_watching_means_no_event
     s.files.update(&s.alice, file.id, out).await.unwrap();
     let event = events.try_recv().unwrap();
     assert_eq!((event.files[0].node.parent_id, event.files[0].apps.clone()), (Some(root.id), vec!["notes".into()]));
+}
+
+#[tokio::test]
+async fn an_app_given_all_files_still_cannot_reach_other_apps_data() {
+    let s = setup().await;
+    let root = s.files.root(&s.alice).await.unwrap();
+    let calendar = s.files.appdata_write(&s.alice, "calendar", "events.json", b"{}".to_vec()).await.unwrap();
+    let notes = s.files.appdata_write(&s.alice, "notes", "theme", b"light".to_vec()).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false).await.unwrap();
+
+    let all = permissions(FileScope::All, true);
+    s.files.create_grant(&s.alice, new_grant(root.id, GrantKind::Standing, true), &all).await.unwrap();
+    assert!(s.files.app_may_access(&s.alice, "notes", file.id, true).await.unwrap());
+    assert!(!s.files.app_may_access(&s.alice, "notes", calendar.id, false).await.unwrap(), "another app's data");
+    assert!(!s.files.app_may_access(&s.alice, "notes", notes.id, false).await.unwrap(), "its own only through AppData");
+    let names: Vec<String> =
+        s.files.app_children(&s.alice, "notes", root.id).await.unwrap().into_iter().map(|n| n.name).collect();
+    assert_eq!(names, ["a.txt"], "no .appdata and no trash in the listing");
+    assert_eq!(s.files.appdata_read(&s.alice, "notes", "theme", 100).await.unwrap(), b"light");
 }
 
 #[tokio::test]

@@ -24,6 +24,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrde
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::appdata::APPDATA_FOLDER;
 use crate::service::{Files, Node};
 
 /// How often the client confirms that a session is still open.
@@ -93,6 +94,9 @@ impl Files {
                 .with_code("PERMISSION_NOT_DECLARED"));
         }
 
+        if self.active_grant_rows(user, Some(&grant.app_id)).await?.len() >= GRANTS_PER_APP {
+            return Err(Error::conflict("TOO_MANY_GRANTS", "This app has too many accesses already: end some first"));
+        }
         let now = Utc::now();
         let row = app_grant::ActiveModel {
             id: Set(Uuid::new_v4()),
@@ -181,7 +185,7 @@ impl Files {
             Err(err) if err.code == "FILE_NOT_FOUND" => return Ok(false),
             Err(err) => return Err(err),
         };
-        if !self.is_inside(&file, grant.node_id).await? {
+        if !self.reachable_path(&file).await?.is_some_and(|above| above.contains(&grant.node_id)) {
             return Ok(false);
         }
         if grant.kind == GrantKind::Session.as_str() {
@@ -196,12 +200,11 @@ impl Files {
     /// it, or a folder above it. For a token the app gives another server.
     pub async fn grant_for(&self, user: &User, app_id: &str, file_id: Uuid, write: bool) -> Result<Option<Uuid>> {
         let file = self.accessible(user, file_id).await?;
-        for grant in self.active_grant_rows(user, Some(app_id)).await? {
-            if (grant.write || !write) && self.is_inside(&file, grant.node_id).await? {
-                return Ok(Some(grant.id));
-            }
-        }
-        Ok(None)
+        let Some(above) = self.reachable_path(&file).await? else {
+            return Ok(None);
+        };
+        let grants = self.active_grant_rows(user, Some(app_id)).await?;
+        Ok(grants.iter().find(|grant| (grant.write || !write) && above.contains(&grant.node_id)).map(|grant| grant.id))
     }
 
     /// Whether the user has a file open in `app_id` now (a session in force):
@@ -227,21 +230,48 @@ impl Files {
     /// the node: the user may, and the user gave the app access to the node or
     /// a folder above it.
     pub async fn app_may_access(&self, user: &User, app_id: &str, node_id: Uuid, write: bool) -> Result<bool> {
+        Ok(match self.app_reach(user, app_id, node_id).await? {
+            Reach::Write => true,
+            Reach::Read => !write,
+            Reach::None => false,
+        })
+    }
+
+    /// How far `app_id`, acting for `user`, may go with the node: the user
+    /// may, and the user gave the app access to the node or a folder above
+    /// it (one walk up the tree, whatever the number of grants).
+    pub(crate) async fn app_reach(&self, user: &User, app_id: &str, node_id: Uuid) -> Result<Reach> {
         let node = match self.accessible(user, node_id).await {
             Ok(node) => node,
-            Err(err) if err.code == "FILE_NOT_FOUND" => return Ok(false),
+            Err(err) if err.code == "FILE_NOT_FOUND" => return Ok(Reach::None),
             Err(err) => return Err(err),
         };
-        // The trash is the user's own, even with all files given.
-        if self.in_trash(&node).await? {
-            return Ok(false);
-        }
+        let Some(above) = self.reachable_path(&node).await? else {
+            return Ok(Reach::None);
+        };
+        let mut reach = Reach::None;
         for grant in self.active_grant_rows(user, Some(app_id)).await? {
-            if (grant.write || !write) && self.is_inside(&node, grant.node_id).await? {
-                return Ok(true);
+            if above.contains(&grant.node_id) {
+                reach = reach.max(if grant.write { Reach::Write } else { Reach::Read });
             }
         }
-        Ok(false)
+        Ok(reach)
+    }
+
+    /// The node and the folders above it, if apps may reach it at all: never
+    /// the trash, nor the apps' data in `.appdata` (each app reaches its own
+    /// through the AppData API), even with all files given.
+    async fn reachable_path(&self, node: &node::Model) -> Result<Option<Vec<Uuid>>> {
+        if self.in_trash(node).await? {
+            return Ok(None);
+        }
+        let chain = self.ancestor_rows(node).await?;
+        // The folder right below the root on the way down, or the node itself.
+        let top = chain.get(1).unwrap_or(node);
+        if top.parent_id.is_some() && top.is_dir && top.name == APPDATA_FOLDER {
+            return Ok(None);
+        }
+        Ok(Some(chain.iter().map(|folder| folder.id).chain([node.id]).collect()))
     }
 
     /// Grants of the user (of one app, if given) that are in force; deletes
@@ -263,6 +293,17 @@ impl Files {
         }
         Ok(active)
     }
+}
+
+/// Accesses one user may give one app at once (open files and folders).
+const GRANTS_PER_APP: usize = 1000;
+
+/// What an app may do with a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Reach {
+    None,
+    Read,
+    Write,
 }
 
 /// Standing grants last until revoked; sessions end when idle or too old.

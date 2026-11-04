@@ -11,6 +11,11 @@ set -eu
 FFMPEG_VERSION=8.1.3
 DAV1D_VERSION=1.5.1
 OPENH264_VERSION=2.6.0
+# SHA-256 of the source archives: a changed archive stops the build. Update
+# them together with the versions (the release's .sha256 files where given).
+FFMPEG_SHA256=7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3
+DAV1D_SHA256=401813f1f89fa8fd4295805aa5284d9aed9bc7fc1fdbe554af4292f64cbabe21
+OPENH264_SHA256=558544ad358283a7ab2930d69a9ceddf913f4a51ee9bf1bfb9e377322af81a69
 PREFIX=${PREFIX:-/opt/ffmpeg}
 JOBS=$(nproc)
 
@@ -19,27 +24,28 @@ apk add --no-cache build-base nasm pkgconf meson ninja curl xz libwebp-dev libwe
 work=$(mktemp -d)
 cd "$work"
 
-# Downloads to a file, trying again on a bad network.
+# Downloads to a file, trying again on a bad network, and checks its SHA-256.
 fetch() {
   curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$2" "$1"
+  echo "$3  $2" | sha256sum -c -
 }
 
 # AV1 (and AVIF) decoding: dav1d, BSD, static.
-fetch "https://code.videolan.org/videolan/dav1d/-/archive/$DAV1D_VERSION/dav1d-$DAV1D_VERSION.tar.gz" dav1d.tar.gz
-tar xzf dav1d.tar.gz
+fetch "https://downloads.videolan.org/pub/videolan/dav1d/$DAV1D_VERSION/dav1d-$DAV1D_VERSION.tar.xz" dav1d.tar.xz "$DAV1D_SHA256"
+tar xJf dav1d.tar.xz
 meson setup "dav1d-$DAV1D_VERSION/build" "dav1d-$DAV1D_VERSION" --buildtype=release --default-library=static \
   --prefix="$PREFIX" --libdir=lib -Denable_tools=false -Denable_tests=false >/dev/null
 ninja -C "dav1d-$DAV1D_VERSION/build" install >/dev/null
 
 # H.264 encoding for videos a browser can't play (streams): OpenH264, BSD, static.
 # Built from source: Cisco's patent licence covers only Cisco's own binaries.
-fetch "https://github.com/cisco/openh264/archive/refs/tags/v$OPENH264_VERSION.tar.gz" openh264.tar.gz
+fetch "https://github.com/cisco/openh264/archive/refs/tags/v$OPENH264_VERSION.tar.gz" openh264.tar.gz "$OPENH264_SHA256"
 tar xzf openh264.tar.gz
 meson setup "openh264-$OPENH264_VERSION/build" "openh264-$OPENH264_VERSION" --buildtype=release \
   --default-library=static --prefix="$PREFIX" --libdir=lib -Dtests=disabled >/dev/null
 ninja -C "openh264-$OPENH264_VERSION/build" install >/dev/null
 
-fetch "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" ffmpeg.tar.xz
+fetch "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" ffmpeg.tar.xz "$FFMPEG_SHA256"
 tar xJf ffmpeg.tar.xz
 cd "ffmpeg-$FFMPEG_VERSION"
 

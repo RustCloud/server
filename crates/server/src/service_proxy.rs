@@ -415,6 +415,15 @@ pub async fn route(State(state): State<AppState>, request: Request, next: Next) 
 }
 
 async fn handle(state: &AppState, route: ProxyRoute, request: Request) -> Result<Response> {
+    // The service's URL parser would resolve `..` (even as `%2e%2e`): the
+    // request would reach paths outside the manifest's.
+    if has_dot_segment(request.uri().path()) {
+        return Err(Error::bad_request("BAD_PATH", "Paths with . or .. segments don't go to services"));
+    }
+    // A service worker of a service would work for the whole site.
+    if request.headers().contains_key("service-worker") {
+        return Err(Error::forbidden("Services can't install service workers").with_code("NO_SERVICE_WORKER"));
+    }
     let user = session_user(&state.auth, request.headers()).await?;
     let websocket = is_websocket(request.headers());
     if (websocket || !request.method().is_safe()) && !from_own_page(request.headers()) {
@@ -474,6 +483,16 @@ fn from_own_page(headers: &HeaderMap) -> bool {
     let (Some(origin), Some(host)) = (origin, host) else { return false };
     let port = origin.port_or_known_default();
     origin.host_str().is_some_and(|name| name.eq_ignore_ascii_case(host.host())) && host.port_u16().or(port) == port
+}
+
+/// Whether a path has a `.` or `..` segment, also percent-encoded (`%2e`), or
+/// a backslash (which URL parsers read as `/`).
+fn has_dot_segment(path: &str) -> bool {
+    path.contains('\\')
+        || path.split('/').any(|segment| {
+            let segment = segment.to_ascii_lowercase().replace("%2e", ".");
+            segment == "." || segment == ".."
+        })
 }
 
 /// The service's address for a request: its origin, then the path and the
@@ -552,6 +571,10 @@ fn response_headers(headers: &HeaderMap, target: &str, own: &str) -> HeaderMap {
         if name == header::SET_COOKIE && !allowed_cookie(value) {
             continue;
         }
+        // These would act on the whole site, not just the service's pages.
+        if SITE_WIDE_HEADERS.contains(&name.as_str()) || name.as_str().starts_with("access-control-") {
+            continue;
+        }
         if name == header::LOCATION {
             let location = value.to_str().ok().and_then(|text| text.strip_prefix(target));
             if let Some(rest) = location.filter(|rest| rest.is_empty() || rest.starts_with('/')) {
@@ -568,6 +591,19 @@ fn response_headers(headers: &HeaderMap, target: &str, own: &str) -> HeaderMap {
     }
     out
 }
+
+/// Headers of a service's answer that are dropped: they would change how the
+/// browser treats the whole site (and outlive the plugin).
+const SITE_WIDE_HEADERS: &[&str] = &[
+    "clear-site-data",
+    "service-worker-allowed",
+    "strict-transport-security",
+    "public-key-pins",
+    "public-key-pins-report-only",
+    "origin-agent-cluster",
+    "set-login",
+    "refresh",
+];
 
 /// Whether the service may set this cookie: not the server's session, and
 /// only for this host (no `Domain`: not for the server's neighbours).
@@ -685,6 +721,36 @@ mod tests {
 
         let only_session = request_headers(&headers(&[("cookie", "rustcloud_session=secret")]), client);
         assert!(!only_session.contains_key("cookie"));
+    }
+
+    #[test]
+    fn paths_that_climb_out_are_refused() {
+        for path in ["/cool/../hosting/capabilities", "/cool/%2e%2e/admin", "/cool/%2E%2E/%2e%2e/x", "/cool/./x"] {
+            assert!(has_dot_segment(path), "{path}");
+        }
+        assert!(has_dot_segment("/cool\\..\\admin"));
+        for path in ["/cool/http%3A%2F%2Fcloud%2Fwopi%2Ffiles%2F1/ws", "/cool/a..b/x", "/browser/dist/cool.html"] {
+            assert!(!has_dot_segment(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn headers_for_the_whole_site_are_dropped() {
+        let service = headers(&[
+            ("content-type", "text/html"),
+            ("service-worker-allowed", "/"),
+            ("clear-site-data", "\"cookies\""),
+            ("strict-transport-security", "max-age=31536000; includeSubDomains"),
+            ("access-control-allow-origin", "https://evil.example"),
+            ("access-control-allow-credentials", "true"),
+        ]);
+        let sent = response_headers(&service, "http://collabora:9980", "https://cloud.example.com");
+        assert_eq!(sent["content-type"], "text/html");
+        for name in ["service-worker-allowed", "clear-site-data", "strict-transport-security"] {
+            assert!(!sent.contains_key(name), "{name}");
+        }
+        assert!(!sent.contains_key("access-control-allow-origin"));
+        assert!(!sent.contains_key("access-control-allow-credentials"));
     }
 
     #[test]

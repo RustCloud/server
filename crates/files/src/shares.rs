@@ -158,6 +158,11 @@ impl Files {
         if node.trashed_at.is_some() {
             return Err(gone());
         }
+        // A disabled account shares nothing any more.
+        let owner = rustcloud_db::user::Entity::find_by_id(node.owner_id).one(&self.db).await?;
+        if owner.is_none_or(|owner| owner.disabled) {
+            return Err(gone());
+        }
         Ok((share, node))
     }
 

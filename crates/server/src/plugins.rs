@@ -482,7 +482,11 @@ impl Plugins {
         let batch = declared.as_ref().map_or(1, |k| k.batch);
         let (memory, time) = declared.as_ref().map_or((1, 1), |k| k.scale());
         let plugin = self.scale(id);
-        config.limits = Limits::scaled(limits::combine(plugin.memory, memory), limits::combine(plugin.time, time));
+        // A kind of job may need more than a request, but never more memory
+        // than the administrator allows plugins at all.
+        let max_memory = self.defaults.read(|d| d.max_memory);
+        let memory = limits::combine(plugin.memory, memory).min(max_memory);
+        config.limits = Limits::scaled(memory, limits::combine(plugin.time, time));
         (batch, config)
     }
 
@@ -942,9 +946,19 @@ fn failed(error: String) -> Status {
 
 /// Whether an update asks users for the same as the installed version.
 fn asks_for_the_same(old: &Manifest, new: &Manifest) -> bool {
+    let jobs_within = new.jobs.iter().all(|job| {
+        old.jobs.iter().any(|before| {
+            let ((memory, time), (old_memory, old_time)) = (job.scale(), before.scale());
+            before.kind == job.kind && memory <= old_memory && time <= old_time && job.batch <= before.batch
+        })
+    });
     old.permissions == new.permissions
         && old.well_known == new.well_known
         && old.proxy == new.proxy
+        && old.downloads == new.downloads
+        && old.server_settings == new.server_settings
+        && (old.large_bodies || !new.large_bodies)
+        && jobs_within
         && new.limits.within(&old.limits)
 }
 

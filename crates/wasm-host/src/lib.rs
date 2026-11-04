@@ -332,12 +332,17 @@ const TICK: Duration = Duration::from_millis(100);
 pub struct WasmHost {
     engine: Engine,
     linker: Linker<Instance>,
-    http: reqwest::Client,
+    http: http::Clients,
     storage: Option<Arc<dyn AppStorage>>,
     ffmpeg: Option<Arc<dyn UseFfmpeg>>,
     onnx: Option<Arc<dyn UseOnnx>>,
     apps: RwLock<HashMap<String, bindings::AppPre<Instance>>>,
+    /// Requests that may run in apps at once; more wait a moment, then get 429.
+    requests: Arc<tokio::sync::Semaphore>,
 }
+
+/// How long a request waits for a free place before it is turned away.
+const QUEUE_WAIT: Duration = Duration::from_secs(5);
 
 impl WasmHost {
     /// Creates the host and starts the clock that stops runaway apps.
@@ -364,8 +369,11 @@ impl WasmHost {
                 }
             })
             .map_err(Error::internal)?;
-        let http = http::client().map_err(Error::internal)?;
-        Ok(Self { engine, linker, http, storage: None, ffmpeg: None, onnx: None, apps: RwLock::default() })
+        let http = http::Clients::new().map_err(Error::internal)?;
+        // Instances take memory (up to their limit each): a few per core.
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let requests = Arc::new(tokio::sync::Semaphore::new((cores * 4).max(8)));
+        Ok(Self { engine, linker, http, storage: None, ffmpeg: None, onnx: None, apps: RwLock::default(), requests })
     }
 
     /// Gives the apps their storage; without it the `storage` import fails.
@@ -445,6 +453,16 @@ impl WasmHost {
         request: Request,
         config: &AppConfig,
     ) -> Result<Response> {
+        let _place = match tokio::time::timeout(QUEUE_WAIT, self.requests.clone().acquire_owned()).await {
+            Ok(Ok(place)) => place,
+            _ => {
+                return Err(Error::new(
+                    rustcloud_core::ErrorKind::TooManyRequests,
+                    "SERVER_BUSY",
+                    "The server is busy, try again in a moment",
+                ))
+            }
+        };
         let user = caller.as_ref().map(|c| c.user.clone());
         let (pre, mut store) = self.prepare(app_id, caller, config, false)?;
         let clock = (store.data().started, store.data().tools.clone());
@@ -495,20 +513,17 @@ impl WasmHost {
         instance.onnx = self.onnx.clone();
         let mut store = Store::new(&self.engine, instance);
         store.limiter(|state| &mut state.store_limits);
-        store.set_epoch_deadline(if background { 1 } else { ticks(config.limits.time) });
-        // At the deadline: stop if the app itself used up its time, else let
-        // it go on for what is left (the rest was spent waiting for the
-        // server). Background work gives way at every tick.
+        store.set_epoch_deadline(1);
+        // At every tick: stop if the app itself used up its time (the rest
+        // was spent waiting for the server), else give way to other work, so
+        // a busy app never holds a thread of the server for long.
         store.epoch_deadline_callback(move |store| {
             let state = store.data();
             let own = state.started.elapsed().saturating_sub(state.host_time);
             if own >= state.limits.time || state.wall_left().is_zero() {
                 return Err(wasmtime::Error::msg("the app ran out of time"));
             }
-            Ok(match background {
-                true => UpdateDeadline::Yield(1),
-                false => UpdateDeadline::Continue(ticks(state.limits.time - own)),
-            })
+            Ok(UpdateDeadline::Yield(1))
         });
         Ok((pre, store))
     }
@@ -548,11 +563,6 @@ fn exports_run_batch(component: &Component) -> bool {
     component.get_export_index(None, "run-batch").is_some()
 }
 
-/// How many clock ticks make `time` (at least one).
-fn ticks(time: Duration) -> u64 {
-    (time.as_millis() / TICK.as_millis()).max(1) as u64
-}
-
 /// Reads an app from its directory: `manifest.toml` and `app.wasm`. The
 /// directory name must be the app's id.
 pub fn read_app_dir(dir: &Path) -> std::result::Result<(Manifest, Vec<u8>), String> {
@@ -582,7 +592,7 @@ struct Instance {
     self_url: Option<String>,
     /// Where the app may send HTTP requests.
     network: Arc<[NetworkRule]>,
-    http: reqwest::Client,
+    http: http::Clients,
     storage: Option<Arc<dyn AppStorage>>,
     ffmpeg: Option<Arc<dyn UseFfmpeg>>,
     onnx: Option<Arc<dyn UseOnnx>>,
@@ -594,7 +604,7 @@ struct Instance {
 }
 
 impl Instance {
-    fn new(app_id: &str, services: Option<Arc<dyn UserServices>>, config: &AppConfig, http: reqwest::Client) -> Self {
+    fn new(app_id: &str, services: Option<Arc<dyn UserServices>>, config: &AppConfig, http: http::Clients) -> Self {
         let limits = config.limits;
         Self {
             app_id: app_id.into(),
@@ -615,8 +625,14 @@ impl Instance {
             // Nothing from the host: no files, network, environment or arguments.
             wasi: WasiCtx::builder().build(),
             table: ResourceTable::new(),
+            // The memory limit is per linear memory: few memories, tables and
+            // instances, so a component of many modules can't multiply it.
             store_limits: StoreLimitsBuilder::new()
                 .memory_size(usize::try_from(limits.memory).unwrap_or(usize::MAX))
+                .memories(4)
+                .tables(64)
+                .table_elements(1 << 20)
+                .instances(64)
                 .build(),
         }
     }

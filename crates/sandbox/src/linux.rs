@@ -100,7 +100,32 @@ fn filters() -> Result<Vec<BpfProgram>, String> {
     for call in [libc::SYS_kill, libc::SYS_tgkill] {
         denied.insert(call, vec![rule(vec![condition(0, SeccompCmpOp::Ne, pid)?])?]);
     }
-    Ok(vec![program(clone3, libc::ENOSYS)?, program(denied, libc::EPERM)?])
+    let mut programs = vec![program(clone3, libc::ENOSYS)?, program(denied, libc::EPERM)?];
+    #[cfg(target_arch = "x86_64")]
+    programs.insert(0, no_x32_calls());
+    Ok(programs)
+}
+
+/// A filter that ends the process at any x32 system call. They have the
+/// x86-64 architecture but other numbers (with bit 30 set), so the deny
+/// list above, written with the x86-64 numbers, wouldn't see them. Most
+/// kernels have x32 turned off; this one doesn't rely on that.
+#[cfg(target_arch = "x86_64")]
+fn no_x32_calls() -> BpfProgram {
+    use seccompiler::sock_filter;
+    const LOAD_WORD: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
+    const JUMP_IF_AT_LEAST: u16 = 0x35; // BPF_JMP | BPF_JGE | BPF_K
+    const RETURN: u16 = 0x06; // BPF_RET | BPF_K
+    const X32_BIT: u32 = 0x4000_0000;
+    const KILL_PROCESS: u32 = 0x8000_0000;
+    const ALLOW: u32 = 0x7fff_0000;
+    vec![
+        // The call's number: the first field of seccomp_data.
+        sock_filter { code: LOAD_WORD, jt: 0, jf: 0, k: 0 },
+        sock_filter { code: JUMP_IF_AT_LEAST, jt: 0, jf: 1, k: X32_BIT },
+        sock_filter { code: RETURN, jt: 0, jf: 0, k: KILL_PROCESS },
+        sock_filter { code: RETURN, jt: 0, jf: 0, k: ALLOW },
+    ]
 }
 
 /// System calls a confined tool may not make at all.

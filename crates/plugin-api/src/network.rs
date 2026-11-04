@@ -15,6 +15,8 @@ pub struct NetworkRule {
     host: String,
     subdomains: bool,
     port: u16,
+    /// Read from a setting the administrator filled in (`"{key}"`).
+    from_setting: bool,
 }
 
 impl NetworkRule {
@@ -51,7 +53,7 @@ impl NetworkRule {
         if host.len() > 253 || !host.split('.').all(valid_label) {
             return Err(format!("\"{host}\" is not a host name"));
         }
-        Ok(Self { https, host, subdomains, port })
+        Ok(Self { https, host, subdomains, port, from_setting: false })
     }
 
     /// The rule for the server of a URL a setting holds:
@@ -63,7 +65,16 @@ impl NetworkRule {
         if authority.starts_with("*.") {
             return Err("a setting names one server".to_owned());
         }
-        Self::parse(&format!("{scheme}://{authority}"))
+        let rule = Self::parse(&format!("{scheme}://{authority}"))?;
+        Ok(Self { from_setting: true, ..rule })
+    }
+
+    /// Whether the host may be in a private network (the LAN, this machine):
+    /// only when an IP address is named, or the administrator gave the
+    /// address in a setting. A name chosen by the plugin's author must lead
+    /// into the internet: its DNS could point anywhere.
+    pub fn reaches_private(&self) -> bool {
+        self.from_setting || self.host.parse::<std::net::IpAddr>().is_ok()
     }
 
     /// The origin it allows, for a browser: `https://office.example.com`,
@@ -130,6 +141,13 @@ mod tests {
 
     fn allows(rule: &str, scheme: &str, host: &str, port: u16) -> bool {
         NetworkRule::parse(rule).expect("valid rule").allows(scheme, host, port)
+    }
+
+    #[test]
+    fn only_ip_addresses_and_settings_may_lead_into_private_networks() {
+        assert!(!NetworkRule::parse("api.example.com").unwrap().reaches_private());
+        assert!(NetworkRule::parse("http://192.168.1.10:11434").unwrap().reaches_private());
+        assert!(NetworkRule::from_url("http://collabora:9980/").unwrap().reaches_private());
     }
 
     #[test]

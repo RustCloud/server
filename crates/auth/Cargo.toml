@@ -25,4 +25,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+futures-util.workspace = true
 rustcloud-db = { workspace = true, features = ["testing"] }

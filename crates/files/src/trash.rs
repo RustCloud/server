@@ -40,6 +40,7 @@ impl Files {
     /// root if that folder is gone or deleted too. A name taken there gets a
     /// number: "report (2).pdf".
     pub async fn restore(&self, user: &User, id: Uuid) -> Result<Node> {
+        let _moving = self.moving.lock().await;
         let node = self.accessible(user, id).await?;
         if node.trashed_from.is_none() {
             let message =

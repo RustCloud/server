@@ -46,8 +46,10 @@
 {"token": "…", "expires_at": "…", "user": {…}}
 ```
 
-Ошибки: `401 INVALID_CREDENTIALS`, `403 ACCOUNT_DISABLED`, `429 TOO_MANY_ATTEMPTS`
-(см. [`max_login_failures`](../configuration.md#accounts)).
+Ошибки: `401 INVALID_CREDENTIALS` (и для отключённого аккаунта: ответ не выдаёт, верен ли
+пароль), `429 TOO_MANY_ATTEMPTS` (см. [`max_login_failures`](../configuration.md#accounts); попытка
+считается до проверки пароля, поэтому пачка одновременных попыток тоже упирается в предел),
+`429 SERVER_BUSY` — все ядра заняты проверкой паролей, попробуйте через секунду.
 
 ## Выход
 

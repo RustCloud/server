@@ -1352,7 +1352,9 @@ async fn plugins_download_files_into_their_storage() {
 
     // A file that doesn't match its checksum is not kept.
     let broken = format!("{manifest}{}", download("models/other.bin", "other.bin", &hex(&model)));
-    install(broken).await;
+    let updated = install(broken).await;
+    assert_eq!(updated["status"]["state"], "disabled", "new downloads wait for the administrator");
+    app.json(Method::PUT, "/api/v1/admin/plugins/echo", As::Browser(&admin), json!({ "enabled": true })).await;
     let echo = settled().await;
     assert_eq!(echo["download"]["state"], "failed");
     assert_eq!(echo["download"]["path"], "models/other.bin");

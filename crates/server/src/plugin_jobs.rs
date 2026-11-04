@@ -53,6 +53,9 @@ const RETRY_AFTER: Duration = Duration::from_secs(30);
 const KEY_LIMIT: usize = 512;
 const DATA_LIMIT: usize = 4096;
 const ADD_LIMIT: usize = 1000;
+/// Jobs of one plugin for one user that may wait at once: a plugin (or a
+/// mistake in one) can't fill the database with them.
+const WAITING_LIMIT: u64 = 200_000;
 /// How often an idle worker looks for jobs whose retry time has come.
 const IDLE: Duration = Duration::from_secs(10);
 
@@ -172,6 +175,14 @@ impl Jobs {
         }
         if jobs.is_empty() {
             return Ok(());
+        }
+        let waiting = plugin_job::Entity::find()
+            .filter(plugin_job::Column::AppId.eq(app_id))
+            .filter(plugin_job::Column::UserId.eq(user_id))
+            .count(&self.db)
+            .await?;
+        if waiting + jobs.len() as u64 > WAITING_LIMIT {
+            return Err(Error::conflict("TOO_MANY_JOBS", format!("more than {WAITING_LIMIT} jobs would wait")));
         }
         let now = Utc::now();
         let rows = jobs.into_iter().map(|job| plugin_job::ActiveModel {
