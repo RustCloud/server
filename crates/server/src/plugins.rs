@@ -62,6 +62,8 @@ use crate::AppState;
 
 /// The id of the plugin that is part of the server.
 const FILES: &str = "files";
+/// The catalog of RustCloud plugins.
+pub const DEFAULT_CATALOG: &str = "https://raw.githubusercontent.com/RustCloud/_plugins/main/index.json";
 /// Largest plugin archive that can be installed.
 pub const ARCHIVE_LIMIT: usize = 64 * 1024 * 1024;
 /// Largest `manifest.toml` in an archive.
@@ -88,6 +90,9 @@ pub struct PluginSettings {
     pub proxy_requests_per_user: u32,
     /// The largest body a request to them may carry, MiB.
     pub proxy_body_mib: u32,
+    /// The plugin catalog (`index.json`, see `docs/dev/plugin-catalog.md`);
+    /// empty: no catalog.
+    pub catalog_url: String,
     /// Before every plugin had multiples of its own: read and forgotten.
     #[serde(default, skip_serializing)]
     memory_mib: Option<u32>,
@@ -104,6 +109,7 @@ impl Default for PluginSettings {
             proxy_connections_per_user: 8,
             proxy_requests_per_user: 16,
             proxy_body_mib: 256,
+            catalog_url: DEFAULT_CATALOG.to_owned(),
             memory_mib: None,
             time_seconds: None,
         }
@@ -131,6 +137,7 @@ impl Settings for PluginSettings {
             Field::number("proxy_connections_per_user", "connections"),
             Field::number("proxy_requests_per_user", "requests"),
             Field::number("proxy_body_mib", "MiB"),
+            Field::text("catalog_url"),
         ]
     }
 
@@ -148,6 +155,10 @@ impl Settings for PluginSettings {
             if !(1..=most).contains(&value) {
                 return Err(Error::bad_request("INVALID_SETTINGS", format!("{name} must be from 1 to {most}")));
             }
+        }
+        let url = self.catalog_url.trim();
+        if !url.is_empty() && !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err(Error::bad_request("INVALID_SETTINGS", "catalog_url must be an http(s):// address or empty"));
         }
         if !SCALES.contains(&self.max_memory) {
             return Err(Error::bad_request("INVALID_SETTINGS", format!("max_memory must be one of {SCALES:?}")));
@@ -614,8 +625,15 @@ impl Plugins {
     /// with the same id. A new plugin is disabled until the administrator
     /// enables it.
     pub async fn install(&self, archive: Bytes) -> Result<Plugin> {
+        self.install_checked(archive, |_| Ok(())).await
+    }
+
+    /// Installs a plugin from an archive if `check` accepts its manifest
+    /// (the catalog checks it is the plugin and version it lists).
+    pub async fn install_checked(&self, archive: Bytes, check: impl FnOnce(&Manifest) -> Result<()>) -> Result<Plugin> {
         let (text, wasm) = tokio::task::spawn_blocking(move || unpack(&archive)).await.map_err(Error::internal)??;
         let manifest = Manifest::from_toml(&text).map_err(|err| invalid_plugin(err.0))?;
+        check(&manifest)?;
         Apps::new(vec![manifest.clone()]).map_err(|err| invalid_plugin(err.0))?;
         let id = manifest.id.clone();
 
@@ -735,7 +753,7 @@ impl Plugins {
         Ok(plugins)
     }
 
-    async fn view_one(&self, plugin: Plugin) -> Result<Plugin> {
+    pub(crate) async fn view_one(&self, plugin: Plugin) -> Result<Plugin> {
         Ok(self.view(vec![plugin]).await?.remove(0))
     }
 

@@ -1312,6 +1312,118 @@ async fn admins_install_update_and_remove_plugins() {
 }
 
 #[tokio::test]
+async fn admins_install_and_update_plugins_from_the_catalog() {
+    use sha2::{Digest, Sha256};
+
+    let api = format!("={}", rustcloud_plugin_api::API_VERSION);
+    let manifest = echo_manifest_toml();
+    let newer = manifest.replace("version = \"0.1.0\"", "version = \"0.2.0\"");
+    let not_echo = manifest.replace("id = \"echo\"", "id = \"other\"");
+    let archives: Vec<(&str, Vec<u8>)> = vec![
+        ("echo-0.1.0.zip", plugin_zip(&manifest, &echo_wasm())),
+        ("echo-0.2.0.zip", plugin_zip(&newer, &echo_wasm())),
+        ("liar.zip", plugin_zip(&not_echo, &echo_wasm())),
+    ];
+    let hex = |data: &[u8]| -> String { Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect() };
+    let release = |version: &str, api: &str, file: &str, sha256: String| {
+        let size = archives.iter().find(|(name, _)| *name == file).map_or(1, |(_, data)| data.len());
+        json!({ "version": version, "api": api, "url": file, "sha256": sha256, "size": size })
+    };
+    let entry = |id: &str, versions: Vec<Value>| {
+        json!({ "id": id, "name": { "en": id }, "description": { "en": "A plugin." }, "author": "Test",
+                "license": "MIT", "source": "https://example.com/src", "versions": versions })
+    };
+    let sha = |file: &str| hex(&archives.iter().find(|(name, _)| *name == file).unwrap().1);
+    let index = json!({ "schema": 1, "plugins": [
+        entry("echo", vec![
+            release("0.1.0", &api, "echo-0.1.0.zip", sha("echo-0.1.0.zip")),
+            release("0.2.0", &api, "echo-0.2.0.zip", sha("echo-0.2.0.zip")),
+            release("9.0.0", "^99", "echo-9.zip", "0".repeat(64)),
+        ]),
+        entry("future", vec![release("1.0.0", "^99", "future.zip", "0".repeat(64))]),
+        entry("files", vec![release("1.0.0", &api, "files.zip", "0".repeat(64))]),
+        entry("tampered", vec![release("0.1.0", &api, "echo-0.1.0.zip", "0".repeat(64))]),
+        entry("liar", vec![release("0.1.0", &api, "liar.zip", sha("liar.zip"))]),
+        json!({ "id": "broken" }),
+    ]});
+
+    // The catalog and its archives, on a server of this machine.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut remote =
+        Router::new().route("/catalog/index.json", axum::routing::get(move || async move { index.to_string() }));
+    for (name, data) in archives.clone() {
+        remote = remote.route(&format!("/catalog/{name}"), axum::routing::get(move || async move { data }));
+    }
+    tokio::spawn(async move { axum::serve(listener, remote).await });
+
+    let app = TestApp::with_wasm_apps(|_| {}).await;
+    let admin = app.register("admin").await;
+    let bob = app.register("bob").await;
+    let catalog_url = json!({ "catalog_url": format!("http://127.0.0.1:{port}/catalog/index.json") });
+    let saved = app.json(Method::PUT, "/api/v1/admin/settings/plugins", As::Browser(&admin), catalog_url).await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.text());
+
+    assert_eq!(app.get("/api/v1/admin/catalog", As::Browser(&bob)).await.status, StatusCode::FORBIDDEN);
+    let actions = || async {
+        let view = app.get("/api/v1/admin/catalog?fresh=true", As::Browser(&admin)).await.json();
+        let plugins = view["plugins"].as_array().unwrap().clone();
+        let actions: Vec<(String, Value, Value)> = plugins
+            .iter()
+            .map(|p| (p["id"].as_str().unwrap().to_owned(), p["action"].clone(), p["release"]["version"].clone()))
+            .collect();
+        (actions, view["skipped"].clone())
+    };
+    let (listed, skipped) = actions().await;
+    assert_eq!(
+        listed[..3],
+        [
+            ("echo".to_owned(), json!("install"), json!("0.2.0")),
+            ("future".to_owned(), json!("needs_newer_server"), Value::Null),
+            ("files".to_owned(), json!("built_in"), json!("1.0.0")),
+        ]
+    );
+    assert_eq!(skipped.as_array().unwrap().len(), 1, "{skipped}");
+
+    let install = |id: &str, version: &str| {
+        let uri = format!("/api/v1/admin/catalog/{id}/install");
+        let body = json!({ "version": version });
+        let (app, admin) = (&app, admin.clone());
+        async move { app.json(Method::POST, &uri, As::Browser(&admin), body).await }
+    };
+    // An older version first: a new plugin starts disabled, as from an archive.
+    let installed = install("echo", "0.1.0").await;
+    assert_eq!(installed.status, StatusCode::CREATED, "{}", installed.text());
+    let installed = installed.json();
+    assert_eq!(
+        (installed["manifest"]["version"].as_str(), installed["status"]["state"].as_str()),
+        (Some("0.1.0"), Some("disabled"))
+    );
+    assert_eq!(actions().await.0[0], ("echo".to_owned(), json!("update"), json!("0.2.0")));
+    assert_eq!(install("echo", "0.2.0").await.json()["manifest"]["version"], "0.2.0");
+    assert_eq!(actions().await.0[0].1, json!("latest"));
+
+    // Only what the catalog lists, checked against it.
+    for (id, version, code) in [
+        ("echo", "0.3.0", "CATALOG_VERSION_NOT_FOUND"),
+        ("echo", "9.0.0", "NEEDS_NEWER_SERVER"),
+        ("nothing", "0.1.0", "PLUGIN_NOT_FOUND"),
+        ("tampered", "0.1.0", "INVALID_PLUGIN"),
+        ("liar", "0.1.0", "INVALID_PLUGIN"),
+    ] {
+        assert_eq!(install(id, version).await.json()["error"]["code"], code, "{id} {version}");
+    }
+    let plugins = app.get("/api/v1/admin/plugins", As::Browser(&admin)).await.json();
+    let ids: Vec<&str> = plugins.as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["files", "echo"], "nothing else was installed");
+
+    // Without an address there is no catalog.
+    let off = json!({ "catalog_url": "" });
+    app.json(Method::PUT, "/api/v1/admin/settings/plugins", As::Browser(&admin), off).await;
+    assert_eq!(app.get("/api/v1/admin/catalog", As::Browser(&admin)).await.json()["error"]["code"], "CATALOG_OFF");
+}
+
+#[tokio::test]
 async fn plugins_download_files_into_their_storage() {
     use sha2::{Digest, Sha256};
 

@@ -6,8 +6,9 @@
 `https://raw.githubusercontent.com/RustCloud/_plugins/main/index.json`.
 
 > Готово: формат и его проверка ([plugin-api/src/catalog.rs](../../crates/plugin-api/src/catalog.rs),
-> `scripts/check.py` в репозитории каталога). Дальше: вкладка «Каталог» на сервере, потом подпись
-> файла ([ROADMAP.md](../../ROADMAP.md#плагины)).
+> `scripts/check.py` в репозитории каталога), каталог на сервере
+> ([plugin_catalog.rs](../../crates/server/src/plugin_catalog.rs), [API](../api/admin.md)). Дальше:
+> подпись файла ([ROADMAP.md](../../ROADMAP.md#плагины)).
 
 ## Формат
 

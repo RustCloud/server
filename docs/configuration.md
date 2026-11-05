@@ -90,6 +90,7 @@
 | `proxy_connections_per_user` | `8` | то же на одного пользователя; открытый документ занимает одно |
 | `proxy_requests_per_user` | `16` | остальных запросов к сервисам одновременно от одного пользователя; лишние — `429` |
 | `proxy_body_mib` | `256` | наибольшее тело запроса к сервису, МиБ (`413`) |
+| `catalog_url` | каталог RustCloud на GitHub | адрес [каталога плагинов](dev/plugin-catalog.md) (`index.json`); пусто — каталога нет |
 
 Ключи `memory_mib` и `time_seconds` прежних версий читаются и не действуют.
 Код: [plugins.rs](../crates/server/src/plugins.rs).

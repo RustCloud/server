@@ -8,7 +8,8 @@
     onclose,
     children,
     wide = false,
-  }: { title: string; onclose: () => void; children: Snippet; wide?: boolean } = $props();
+    large = false,
+  }: { title: string; onclose: () => void; children: Snippet; wide?: boolean; large?: boolean } = $props();
 
   let dialog: HTMLDialogElement;
 
@@ -17,7 +18,7 @@
   });
 </script>
 
-<dialog bind:this={dialog} {onclose} aria-label={title} class:wide>
+<dialog bind:this={dialog} {onclose} aria-label={title} class:wide class:large>
   <header>
     <h2>{title}</h2>
     <button type="button" class="icon" aria-label={t.close} onclick={() => dialog.close()}>×</button>
@@ -37,6 +38,9 @@
   }
   dialog.wide {
     width: min(720px, calc(100vw - 32px));
+  }
+  dialog.large {
+    width: min(880px, calc(100vw - 32px));
   }
   dialog::backdrop {
     background: rgb(0 0 0 / 0.35);

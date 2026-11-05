@@ -76,6 +76,8 @@ workers = 0
 # The most memory one plugin gets, as a multiple of 64 MiB (1, 2, 4, 8, 16, 32,
 # 64), whatever its manifest or Administration → Plugins asks for.
 max_memory = 16
+# The plugin catalog (Administration → Plugins → Catalog); "" turns it off.
+catalog_url = "https://raw.githubusercontent.com/RustCloud/_plugins/main/index.json"
 
 [media]
 # use.ffmpeg: ffmpeg the server runs for plugins the administrator approved it

@@ -17,6 +17,7 @@ mod grants;
 pub mod journal;
 pub mod listen;
 pub mod network;
+mod plugin_catalog;
 mod plugin_jobs;
 mod plugin_storage;
 mod plugins;
@@ -66,6 +67,7 @@ pub struct AppState {
     pub settings: Arc<SettingsFile>,
     pub journal: Arc<Journal>,
     pub plugins: Arc<Plugins>,
+    pub catalog: Arc<plugin_catalog::PluginCatalog>,
     pub jobs: Arc<Jobs>,
     pub media: Arc<Media>,
     pub onnx: Arc<Onnx>,
@@ -125,6 +127,7 @@ impl AppState {
         )
         .await?;
         let plugins = Arc::new(plugins);
+        let catalog = Arc::new(plugin_catalog::PluginCatalog::new(plugin_settings.clone())?);
         plugins.start_all_downloads();
         let auth = Arc::new(Auth::new(db.clone(), accounts.clone()));
         let files = Arc::new(Files::new(db.clone(), blobs, file_settings.clone()));
@@ -161,6 +164,7 @@ impl AppState {
             proxy,
             settings: Arc::new(SettingsFile::new(config, sections)?),
             plugins,
+            catalog,
             server,
             db,
         })
@@ -176,6 +180,7 @@ pub fn app(state: AppState) -> Router {
         .merge(app_passwords::router())
         .merge(app_shares::router())
         .merge(plugins::router())
+        .merge(plugin_catalog::router())
         .merge(use_ffmpeg::router())
         .merge(use_onnx::router())
         .merge(system::router())

@@ -224,6 +224,42 @@ export interface PluginStorageFile {
   updated_at: string;
 }
 
+/** A version of a plugin in the catalog. */
+export interface CatalogRelease {
+  version: string;
+  /** The plugin API it needs, e.g. `^0.2.16`. */
+  api: string;
+  url: string;
+  sha256: string;
+  size: number;
+  /** What changed, by language code. */
+  notes?: Record<string, string>;
+}
+
+/** A plugin of the catalog with what can be done with it on this server (`/api/v1/admin/catalog`). */
+export interface CatalogItem {
+  id: string;
+  name: Record<string, string>;
+  description: Record<string, string>;
+  author: string;
+  license: string;
+  source: string;
+  homepage?: string;
+  versions: CatalogRelease[];
+  /** The newest version that works here: what "Install" or "Update" gets. */
+  release: CatalogRelease | null;
+  /** The installed version, if any. */
+  installed: string | null;
+  action: 'install' | 'update' | 'latest' | 'needs_newer_server' | 'built_in';
+}
+
+export interface CatalogView {
+  url: string;
+  plugins: CatalogItem[];
+  /** Entries of the catalog that were skipped, and why. */
+  skipped: string[];
+}
+
 export interface PluginUpdate {
   enabled: boolean;
   /** null: as the manifest says. */
@@ -437,8 +473,7 @@ export function statusItems(answer: unknown): StatusItem[] {
     typeof text === 'string' ||
     (!!text && typeof text === 'object' && Object.values(text).every((value) => typeof value === 'string'));
   const valid =
-    Array.isArray(answer) &&
-    answer.every((item) => item && levels.includes(item.level) && isText(item.text));
+    Array.isArray(answer) && answer.every((item) => item && levels.includes(item.level) && isText(item.text));
   if (!valid) throw new ApiError(0, 'BAD_STATUS', 'The plugin answered something other than a list of status lines');
   return answer;
 }
@@ -537,6 +572,10 @@ export const api = {
     request<Plugin>('PUT', `/api/v1/admin/plugins/${encodeURIComponent(id)}`, update),
   /** Installs or updates a plugin from a zip archive. */
   installPlugin: (archive: File) => request<Plugin>('POST', '/api/v1/admin/plugins', archive),
+  /** The plugin catalog; `fresh` downloads it again instead of using the copy the server keeps. */
+  pluginCatalog: (fresh = false) => request<CatalogView>('GET', `/api/v1/admin/catalog${fresh ? '?fresh=true' : ''}`),
+  installFromCatalog: (id: string, version: string) =>
+    request<Plugin>('POST', `/api/v1/admin/catalog/${encodeURIComponent(id)}/install`, { version }),
   /** A secret missing or empty keeps its value, `null` clears it. */
   savePluginSettings: (id: string, values: Record<string, unknown>) =>
     request<Plugin>('PUT', `/api/v1/admin/plugins/${encodeURIComponent(id)}/settings`, values),

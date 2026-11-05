@@ -7,6 +7,7 @@
   import { api, type Plugin } from '../lib/api';
   import { loadApps } from '../lib/apps.svelte';
   import { errorText, locale, t } from '../lib/i18n';
+  import PluginCatalog from './PluginCatalog.svelte';
   import PluginDialog from './PluginDialog.svelte';
 
   let plugins = $state<Plugin[]>([]);
@@ -15,6 +16,7 @@
   let error = $state('');
   let message = $state('');
   let installing = $state(false);
+  let catalogOpen = $state(false);
   let archiveInput = $state<HTMLInputElement>();
   /** The plugin open in the dialog. */
   let openId = $state<string | null>(null);
@@ -108,9 +110,10 @@
 <section class="card">
   <div class="title">
     <h2>{t.pluginsTitle}</h2>
-    <button type="button" class="primary" disabled={installing} onclick={() => archiveInput?.click()}>
-      {t.pluginInstall}
-    </button>
+    <div class="buttons">
+      <button type="button" class="primary" onclick={() => (catalogOpen = true)}>{t.catalog}</button>
+      <button type="button" disabled={installing} onclick={() => archiveInput?.click()}>{t.pluginInstall}</button>
+    </div>
     <input
       bind:this={archiveInput}
       type="file"
@@ -153,6 +156,16 @@
   </ul>
 </section>
 
+{#if catalogOpen}
+  <PluginCatalog
+    onchanged={async () => {
+      await load();
+      await loadApps();
+    }}
+    onclose={() => (catalogOpen = false)}
+  />
+{/if}
+
 {#if opened}
   <PluginDialog
     plugin={opened}
@@ -174,6 +187,11 @@
     justify-content: space-between;
     gap: 10px;
     margin-bottom: 4px;
+  }
+  .buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
   ul {
     list-style: none;

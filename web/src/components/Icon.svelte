@@ -27,6 +27,7 @@
     note: 'M6 3h9l3 3v15H6zM9 10h6M9 14h6M9 18h4',
     calendar: 'M4 6h16v14H4zM4 10h16M8 3v5M16 3v5',
     lock: 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3',
+    refresh: 'M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5',
     history: 'M3 12a9 9 0 1 0 2.6-6.4L3 8M3 3v5h5M12 7v5l3 3',
   };
   export type IconName = keyof typeof PATHS;

@@ -71,6 +71,22 @@
 в корне или в одной папке. Ответ `201` — плагин. Новый — `disabled`; обновление с тем же `id`
 остаётся включённым, только если просит у пользователей и у сервера (`[limits]`) не больше прежнего.
 
+`GET /api/v1/admin/catalog[?fresh=true]` → [каталог плагинов](../dev/plugin-catalog.md):
+`{url, plugins, skipped}`. Каталог скачивается с `[plugins] catalog_url` и хранится 10 минут
+(`fresh=true` — скачать заново). У плагина — поля записи каталога (`id`, `name`, `description`,
+`author`, `license`, `source`, `homepage?`, `versions`) и:
+`release` — новейшая версия, подходящая к API сервера (или `null`), `installed` — установленная
+версия (или `null`), `action` — `install`, `update`, `latest` (стоит новейшая), `needs_newer_server`,
+`built_in` (плагин с этим `id` поставляется с сервером). `skipped` — пропущенные записи с причиной.
+Ошибки: `404 CATALOG_OFF` (адрес пуст), `502 CATALOG_UNAVAILABLE` (не скачался или не читается).
+
+`POST /api/v1/admin/catalog/{id}/install` — тело `{version}` (версия, которую видел администратор).
+Скачивает архив, сверяет размер и SHA-256 с каталогом, `id`, `version` и `api` манифеста — с записью,
+дальше как `POST /api/v1/admin/plugins`: ответ `201` — плагин, новый `disabled`. Ошибки:
+`404 PLUGIN_NOT_FOUND`/`CATALOG_VERSION_NOT_FOUND`, `400 NEEDS_NEWER_SERVER`, `400 INVALID_PLUGIN` (архив не
+совпал с каталогом), `502 CATALOG_UNAVAILABLE`. Архив — только `https://`, либо `http://`, если и
+каталог на `http://` (зеркало в локальной сети).
+
 `GET /api/v1/admin/use/ffmpeg` → состояние [`use.ffmpeg`](../dev/use.md): `{available, ffmpeg, layers: {rlimits, no_new_privs, seccomp, landlock}, problem, capabilities}`. `problem` — почему недоступен или что слабее, чем должно быть (нет Landlock).
 
 `GET /api/v1/admin/use/onnx` → состояние [`use.onnx`](../dev/use.md#use-onnx): `{available, engine, layers, problem, keep_loaded_seconds, loaded: [{app_id, path, idle_seconds, busy}]}` — `loaded` — модели в памяти сейчас, недавние первыми.
