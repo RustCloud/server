@@ -470,6 +470,15 @@ impl fmt::Display for ManifestError {
 
 impl std::error::Error for ManifestError {}
 
+/// Whether `id` may be an app's id: 1–40 lower-case letters, digits and
+/// `-`, not starting with `-`.
+pub(crate) fn valid_app_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 40
+        && !id.starts_with('-')
+        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 impl Manifest {
     /// Reads and checks a `manifest.toml`.
     pub fn from_toml(text: &str) -> Result<Self, ManifestError> {
@@ -480,11 +489,7 @@ impl Manifest {
 
     /// Checks what the types alone don't.
     pub fn validate(&self) -> Result<(), ManifestError> {
-        let valid_id = !self.id.is_empty()
-            && self.id.len() <= 40
-            && !self.id.starts_with('-')
-            && self.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-        if !valid_id {
+        if !valid_app_id(&self.id) {
             return Err(ManifestError(format!(
                 "app id \"{}\" must be 1–40 lower-case letters, digits or \"-\"",
                 self.id

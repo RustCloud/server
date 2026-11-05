@@ -3440,6 +3440,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "semver",
  "serde",
+ "serde_json",
  "toml 0.8.23",
 ]
 

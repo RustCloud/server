@@ -9,6 +9,7 @@
 //! An app crate depends only on this crate, never on the server's internals:
 //! that is what lets the same app later run as a WASM plugin.
 
+pub mod catalog;
 pub mod limits;
 mod manifest;
 mod network;
