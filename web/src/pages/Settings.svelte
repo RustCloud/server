@@ -1,8 +1,9 @@
-<!-- The user's own profile, password, storage usage, the access given to apps, shared app data and app passwords. -->
+<!-- The user's own profile, password and ways to log in, storage usage, the access given to apps, shared app data and app passwords. -->
 <script lang="ts">
   import AppAccess from '../components/AppAccess.svelte';
   import AppPasswords from '../components/AppPasswords.svelte';
   import AppShares from '../components/AppShares.svelte';
+  import LoginMethods from '../components/LoginMethods.svelte';
   import { api, type Usage } from '../lib/api';
   import { formatBytes } from '../lib/format';
   import { errorText, t } from '../lib/i18n';
@@ -19,6 +20,8 @@
   let passwordError = $state(false);
   let revokeAppPasswords = $state(false);
   let sessionsMessage = $state('');
+  /** Accounts of login services may have no password to change. */
+  let hasPassword = $state(true);
 
   let usage = $state<Usage | null>(null);
   api.usage().then((u) => (usage = u));
@@ -69,7 +72,7 @@
     {#if profileMessage}<p class="muted small">{profileMessage}</p>{/if}
   </form>
 
-  <form class="card" onsubmit={savePassword}>
+  {#if hasPassword}<form class="card" onsubmit={savePassword}>
     <h2>{t.changePassword}</h2>
     <label>
       {t.currentPassword}
@@ -85,7 +88,9 @@
     </label>
     <button type="submit" class="primary">{t.save}</button>
     {#if passwordMessage}<p class:error={passwordError} class="small">{passwordMessage}</p>{/if}
-  </form>
+  </form>{/if}
+
+  <LoginMethods bind:hasPassword />
 
   <section class="card">
     <h2>{t.sessions}</h2>

@@ -77,6 +77,85 @@
 Смена пароля завершает все остальные сессии пользователя; с `revoke_app_passwords: true` отзывает
 и все [пароли приложений](app-passwords.md).
 
+## Вход через сервисы (OIDC)
+
+Сервисы OpenID Connect (Keycloak, Authentik, Google…) добавляет администратор
+([ниже](#сервисы-входа-админ)). Модуль — [oidc.rs](../../crates/server/src/oidc.rs).
+
+| Запрос                                   | Кто          | Ответ |
+|------------------------------------------|--------------|-------|
+| `GET /api/v1/auth/oidc`                  | все          | `[{id, name}]` — включённые сервисы, кнопки страницы входа |
+| `GET /api/v1/auth/oidc/{id}/login`       | браузер      | `303` на сервис |
+| `POST /api/v1/auth/oidc/{id}/link`       | пользователь | `{url}` — куда отправить браузер, чтобы привязать сервис к своему аккаунту |
+| `GET /api/v1/auth/oidc/{id}/callback`    | сервис       | `303` на `/` (вход), `/#/settings?oidc_linked={id}` (привязка) или страницу с `?oidc_error=<код>` |
+
+Поток — authorization code с PKCE. Начало запоминает на сервере `state`, `nonce` и PKCE на
+10 минут, а `state` кладёт в cookie `rustcloud_oidc` (HttpOnly, SameSite=Lax, путь
+`/api/v1/auth/oidc`). Callback принимается только от того же браузера: чужая ссылка с кодом
+никого не впустит. ID-токен проверяется полностью (подпись по ключам сервиса, `iss`, `aud`,
+`nonce`, срок); `sub` из него — личность `("oidc:{id}", sub)` в таблице `identities`.
+Группы, почта и имя берутся из ID-токена, а если их там нет — из userinfo.
+
+Адрес возврата — `{public_url}/api/v1/auth/oidc/{id}/callback`; без
+[`server.public_url`](../configuration.md#server) — адрес, по которому открыт сервер. Если
+`public_url` задан, а браузер пришёл по другому адресу, вход сначала переходит на `public_url`.
+
+**Первый вход** того, кого сервер ещё не знает:
+
+1. С включённым `link_by_email` и почтой, которую сервис отметил подтверждённой
+   (`email_verified: true`), — аккаунт с той же почтой, если он ровно один.
+2. Иначе с `auto_create` — новый аккаунт: имя из `preferred_username`, почты или имени,
+   приведённое к правилам имён; занятое получает `-2`, `-3`… Пароля у аккаунта нет.
+3. Иначе — `NO_ACCOUNT`.
+
+**Группы** (поле `groups_claim`, точки — вложенные объекты: `realm_access.roles`):
+с непустым `user_groups` входят только участники `user_groups` или `admin_groups`
+(`NOT_ALLOWED`); с непустым `admin_groups` при каждом входе участники становятся
+администраторами, остальные теряют права. Последнего администратора сервер так не понижает.
+
+Коды в `oidc_error`: `OIDC_UNAVAILABLE` (сервис выключен или недоступен), `OIDC_EXPIRED`
+(вход начат в другом браузере или дольше 10 минут), `OIDC_CANCELLED` (сервис ответил ошибкой,
+например пользователь отказался), `OIDC_FAILED` (ответ сервиса не прошёл проверку —
+подробности в журнале), `NO_ACCOUNT`, `NOT_ALLOWED`, `ACCOUNT_DISABLED`, `LOGIN_TAKEN`.
+Неудачи пишутся в журнал как `auth.login_failed` с `method=oidc:{id}` и причиной.
+
+## Способы входа аккаунта
+
+| Запрос                              | Ответ |
+|-------------------------------------|-------|
+| `GET /api/v1/auth/logins`           | `[{id, provider, created_at}]`, `provider` — `password` или `oidc:{id}` |
+| `DELETE /api/v1/auth/logins/{id}`   | `204` — отвязать сервис |
+
+Пароль так не убрать (`400 CANNOT_UNLINK_PASSWORD`), последний способ входа тоже
+(`400 LAST_LOGIN`). Привязка — [`POST /api/v1/auth/oidc/{id}/link`](#вход-через-сервисы-oidc);
+сервис, уже привязанный к другому аккаунту, — `409 LOGIN_TAKEN`.
+
+## Сервисы входа (админ)
+
+| Запрос                            | Тело       | Ответ |
+|-----------------------------------|------------|-------|
+| `GET /api/v1/admin/oidc`          | —          | `[Provider]` |
+| `POST /api/v1/admin/oidc`         | `Provider` | `201 Provider` |
+| `PUT /api/v1/admin/oidc/{id}`     | `Provider` | `Provider` |
+| `DELETE /api/v1/admin/oidc/{id}`  | —          | `204` |
+
+```json
+{
+  "id": "corp", "name": "Аккаунт компании", "issuer": "https://auth.example.com/realms/main",
+  "client_id": "rustcloud", "client_secret": "…", "scopes": "openid profile email",
+  "enabled": true, "auto_create": true, "link_by_email": false,
+  "groups_claim": "groups", "user_groups": ["staff"], "admin_groups": ["cloud-admins"]
+}
+```
+
+В ответе вместо `client_secret` — `has_secret`, и ещё `created_at` и `redirect_url` (адрес,
+который нужно указать на сервисе). При изменении пустой `client_secret` оставляет прежний;
+`id` и `issuer` не меняются (`400 INVALID_OIDC_PROVIDER`): тот же `sub` от другого сервиса —
+другой человек. При добавлении сервер читает `{issuer}/.well-known/openid-configuration`
+(`400 OIDC_DISCOVERY_FAILED` с причиной). Удаление стирает привязки аккаунтов к сервису;
+аккаунты остаются. Значения по умолчанию: `scopes` — `openid profile email` (`openid`
+добавляется всегда), `groups_claim` — `groups`, `enabled` и `auto_create` — `true`.
+
 ## Пользователи (админ)
 
 | Запрос                               | Тело                                                         | Ответ        |

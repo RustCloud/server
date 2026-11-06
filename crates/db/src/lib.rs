@@ -14,7 +14,7 @@
 //! | table        | what it holds                                               |
 //! |--------------|-------------------------------------------------------------|
 //! | `users`      | accounts: profile, admin flag, quota                        |
-//! | `identities` | ways to log in to an account (password, later OIDC, LDAP…)  |
+//! | `identities` | ways to log in to an account (password, OIDC, later LDAP)  |
 //! | `sessions`   | login sessions (only a hash of the token is stored)         |
 //! | `nodes`      | the file tree: folders and files of every user              |
 //! | `shares`     | public links to files and folders                           |
@@ -25,6 +25,7 @@
 //! | `plugin_configs` | what the administrator set for each plugin              |
 //! | `plugin_files` | each plugin's own storage on the server (models, caches)  |
 //! | `plugin_jobs` | background jobs of plugins, waiting or failed             |
+//! | `oidc_providers` | external login services (OpenID Connect)              |
 
 pub mod entities;
 mod migrations;
@@ -32,8 +33,8 @@ mod migrations;
 pub mod testing;
 
 pub use entities::{
-    app_grant, app_password, app_share, file_lock, file_version, identity, log_entry, node, plugin_config, plugin_file,
-    plugin_job, session, share, user,
+    app_grant, app_password, app_share, file_lock, file_version, identity, log_entry, node, oidc_provider,
+    plugin_config, plugin_file, plugin_job, session, share, user,
 };
 pub use sea_orm::DatabaseConnection;
 

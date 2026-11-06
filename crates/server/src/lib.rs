@@ -17,6 +17,7 @@ mod grants;
 pub mod journal;
 pub mod listen;
 pub mod network;
+mod oidc;
 mod plugin_catalog;
 mod plugin_jobs;
 mod plugin_storage;
@@ -73,6 +74,7 @@ pub struct AppState {
     pub onnx: Arc<Onnx>,
     pub links: Arc<app_links::AppLinks>,
     pub proxy: Arc<service_proxy::ServiceProxy>,
+    pub oidc: Arc<oidc::Oidc>,
 }
 
 impl AppState {
@@ -130,6 +132,7 @@ impl AppState {
         let catalog = Arc::new(plugin_catalog::PluginCatalog::new(plugin_settings.clone())?);
         plugins.start_all_downloads();
         let auth = Arc::new(Auth::new(db.clone(), accounts.clone()));
+        let oidc = Arc::new(oidc::Oidc::new(db.clone(), auth.clone(), server.clone())?);
         let files = Arc::new(Files::new(db.clone(), blobs, file_settings.clone()));
         files.start_trash_cleanup();
         std::fs::create_dir_all(&config.startup.data_dir).map_err(Error::internal)?;
@@ -162,6 +165,7 @@ impl AppState {
             onnx,
             links,
             proxy,
+            oidc,
             settings: Arc::new(SettingsFile::new(config, sections)?),
             plugins,
             catalog,
@@ -175,6 +179,7 @@ impl AppState {
 pub fn app(state: AppState) -> Router {
     let api = Router::new()
         .merge(rustcloud_auth::router())
+        .merge(oidc::router())
         .merge(rustcloud_files::router())
         .merge(grants::router())
         .merge(app_passwords::router())

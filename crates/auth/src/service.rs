@@ -119,7 +119,7 @@ pub struct Auth {
     providers: Vec<Arc<dyn CredentialProvider>>,
     pub(crate) limiter: AttemptLimiter,
     /// Serialises registrations so that exactly one first user becomes admin.
-    registration: Mutex<()>,
+    pub(crate) registration: Mutex<()>,
 }
 
 impl Auth {
@@ -458,7 +458,7 @@ impl Auth {
         Ok(updated.into())
     }
 
-    async fn find_row(&self, user_id: Uuid) -> Result<user::Model> {
+    pub(crate) async fn find_row(&self, user_id: Uuid) -> Result<user::Model> {
         user::Entity::find_by_id(user_id)
             .one(&self.db)
             .await?
@@ -482,7 +482,7 @@ pub(crate) fn too_many_attempts(message: impl Into<String>) -> Error {
 }
 
 /// Trims a display name; `None` or blank means "not given".
-fn clean_display_name(name: Option<&str>) -> Result<Option<String>> {
+pub(crate) fn clean_display_name(name: Option<&str>) -> Result<Option<String>> {
     let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) else {
         return Ok(None);
     };
@@ -494,7 +494,7 @@ fn clean_display_name(name: Option<&str>) -> Result<Option<String>> {
 
 /// Trims an email; blank means "no email". Only a light sanity check is done:
 /// the address is not used for anything yet.
-fn clean_email(email: Option<&str>) -> Result<Option<String>> {
+pub(crate) fn clean_email(email: Option<&str>) -> Result<Option<String>> {
     let Some(email) = email.map(str::trim).filter(|e| !e.is_empty()) else {
         return Ok(None);
     };

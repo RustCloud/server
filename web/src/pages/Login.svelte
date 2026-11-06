@@ -1,7 +1,8 @@
-<!-- Login, and registration when it is allowed (always for the very first account). -->
+<!-- Login (with a password or through a login service), and registration when it is allowed (always for the very first account). -->
 <script lang="ts">
-  import { api, type AuthStatus } from '../lib/api';
+  import { api, type AuthStatus, type OidcButton } from '../lib/api';
   import { errorText, t } from '../lib/i18n';
+  import { go, route } from '../lib/router.svelte';
   import { session } from '../lib/session.svelte';
   import Logo from '../components/Logo.svelte';
 
@@ -12,11 +13,20 @@
   let displayName = $state('');
   let error = $state('');
   let busy = $state(false);
+  let services = $state<OidcButton[]>([]);
 
   api.status().then((s) => {
     status = s;
     registering = s.needs_setup;
   });
+  api.oidcButtons().then((list) => (services = list)).catch(() => {});
+
+  // A login service sends the browser back with an error code when the login failed.
+  const failed = route.query.get('oidc_error');
+  if (failed) {
+    error = t.errors[failed] ?? t.errors.OIDC_FAILED;
+    go('/');
+  }
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
@@ -64,8 +74,15 @@
       />
     </label>
 
-    {#if error}<p class="error">{error}</p>{/if}
+    {#if error}<p class="error" role="alert">{error}</p>{/if}
     <button type="submit" class="primary" disabled={busy}>{registering ? t.createAccount : t.login}</button>
+
+    {#if services.length && !registering}
+      <p class="or muted small"><span>{t.orDivider}</span></p>
+      {#each services as service (service.id)}
+        <a class="button service" href={api.oidcLoginUrl(service.id)}>{t.loginWith(service.name)}</a>
+      {/each}
+    {/if}
 
     {#if status?.registration_open && !status.needs_setup}
       <p class="muted small switch">
@@ -104,5 +121,20 @@
   }
   .switch .link {
     color: var(--accent);
+  }
+  .or {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+  }
+  .or::before,
+  .or::after {
+    content: '';
+    flex: 1;
+    border-top: 1px solid var(--border);
+  }
+  .service {
+    justify-content: center;
   }
 </style>

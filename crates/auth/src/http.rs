@@ -21,7 +21,7 @@ use axum::extract::{FromRef, FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::engine::general_purpose::STANDARD;
@@ -31,6 +31,7 @@ use rustcloud_core::{ClientInfo, Error, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::external::LinkedLogin;
 use crate::provider::PasswordProvider;
 use crate::service::{AccountUpdate, Auth, NewAccount, NewSession, ProfileUpdate, SessionUser, User};
 
@@ -143,6 +144,8 @@ where
         .route("/api/v1/auth/logout-others", post(logout_others))
         .route("/api/v1/auth/me", get(me).patch(update_me))
         .route("/api/v1/auth/password", post(change_password))
+        .route("/api/v1/auth/logins", get(linked_logins))
+        .route("/api/v1/auth/logins/{id}", delete(unlink))
         .route("/api/v1/admin/users", get(list_users).post(create_user))
         .route("/api/v1/admin/users/{id}", patch(update_user))
 }
@@ -195,15 +198,21 @@ struct SessionReply {
 /// Sets the session cookie and returns the session (with the token, for API
 /// clients that aren't web pages).
 fn start_session(session: NewSession, client: ClientInfo, headers: &HeaderMap) -> impl IntoResponse {
+    let cookie = session_cookie(&session, client);
+    let token = (!from_a_web_page(headers)).then_some(session.token);
+    (CookieJar::new().add(cookie), Json(SessionReply { token, expires_at: session.expires_at, user: session.user }))
+}
+
+/// The session cookie of a browser that just logged in.
+pub fn session_cookie(session: &NewSession, client: ClientInfo) -> Cookie<'static> {
     let max_age = (session.expires_at - Utc::now()).num_seconds();
-    let cookie = Cookie::build((SESSION_COOKIE, session.token.clone()))
+    Cookie::build((SESSION_COOKIE, session.token.clone()))
         .http_only(true)
         .same_site(SameSite::Lax)
         .secure(client.https)
         .path("/")
-        .max_age(time::Duration::seconds(max_age));
-    let token = (!from_a_web_page(headers)).then_some(session.token);
-    (CookieJar::new().add(cookie), Json(SessionReply { token, expires_at: session.expires_at, user: session.user }))
+        .max_age(time::Duration::seconds(max_age))
+        .build()
 }
 
 async fn logout(State(auth): State<Arc<Auth>>, current: CurrentUser) -> Result<impl IntoResponse> {
@@ -254,6 +263,16 @@ async fn change_password(
 ) -> Result<StatusCode> {
     auth.change_password(&current.0, &change.current_password, &change.new_password, change.revoke_app_passwords)
         .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The ways to log in to the caller's account (password, external services).
+async fn linked_logins(State(auth): State<Arc<Auth>>, current: CurrentUser) -> Result<Json<Vec<LinkedLogin>>> {
+    Ok(Json(auth.linked_logins(current.id()).await?))
+}
+
+async fn unlink(State(auth): State<Arc<Auth>>, current: CurrentUser, Path(id): Path<Uuid>) -> Result<StatusCode> {
+    auth.unlink_identity(current.user(), id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

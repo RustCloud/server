@@ -5,7 +5,8 @@
 //! 1. **Login methods are strategies.** A [`CredentialProvider`] checks
 //!    credentials and returns an [`Identity`]. Passwords are one provider;
 //!    LDAP would be another. Redirect-based methods (OIDC) produce an
-//!    [`Identity`] in their callback instead.
+//!    [`Identity`] in their callback and log in with
+//!    [`Auth::sign_in_external`], which also creates accounts on first login.
 //! 2. **One way into a session.** [`Auth::sign_in`] turns any identity into a
 //!    session, so rules like "disabled users cannot log in" live in one place.
 //! 3. **Opaque session tokens.** A session is a random token; the database
@@ -16,6 +17,7 @@
 //! [`AdminUser`] extractors.
 
 mod app_passwords;
+mod external;
 mod http;
 mod limiter;
 mod provider;
@@ -26,7 +28,10 @@ mod settings;
 use service::IP_FAILURE_FACTOR;
 
 pub use app_passwords::{Access, AppPassword, AppPasswordUser, CreatedAppPassword, NewAppPassword, Scope};
-pub use http::{basic_credentials, from_a_web_page, router, AdminUser, CurrentUser, CSRF_HEADER, SESSION_COOKIE};
+pub use external::{ExternalLogin, LinkedLogin};
+pub use http::{
+    basic_credentials, from_a_web_page, router, session_cookie, AdminUser, CurrentUser, CSRF_HEADER, SESSION_COOKIE,
+};
 pub use limiter::AttemptLimiter;
 pub use provider::{CredentialProvider, Identity, PasswordProvider};
 pub use service::{AccountUpdate, Auth, AuthStatus, NewAccount, NewSession, ProfileUpdate, SessionUser, User};

@@ -31,7 +31,15 @@ let auth = Auth::new(db, accounts).with_provider(Arc::new(LdapProvider::new(…)
 
 ## Редирект (OIDC)
 
-Не укладывается в «проверь логин и секрет». Обработчик callback сам проверяет ID-токен,
-строит `Identity { provider: "oidc:company", subject: sub }` и вызывает `Auth::sign_in`.
+Не укладывается в «проверь логин и секрет». Поток живёт в
+[server/src/oidc.rs](../../crates/server/src/oidc.rs) (`openidconnect`, код с PKCE): callback
+проверяет ID-токен, строит `Identity { provider: "oidc:corp", subject: sub }` и вызывает
+`Auth::sign_in_external` ([auth/src/external.rs](../../crates/auth/src/external.rs)). Тот находит
+аккаунт по личности, а при первом входе — по подтверждённой почте или создаёт новый, применяет
+решение сервиса о правах администратора и выдаёт сессию. Так же сможет работать любой вход
+через внешний сервис (SAML, другой протокол): ему нужно только собрать `ExternalLogin`.
+
+Сервисы хранятся в таблице `oidc_providers` (секрет клиента — только там, API его не отдаёт).
+Поведение и API — [Аккаунты](../api/auth.md#вход-через-сервисы-oidc).
 
 См. также: [Устройство](architecture.md), [Аккаунты](../api/auth.md)

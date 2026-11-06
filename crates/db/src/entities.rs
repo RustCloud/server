@@ -31,7 +31,7 @@ pub mod user {
 ///
 /// `provider` names the login method and `subject` is the account's id within
 /// it. For passwords: `("password", "<username>")` with the Argon2 hash in
-/// `secret_hash`. For an OIDC provider it would be `("oidc:<name>", "<sub claim>")`
+/// `secret_hash`. For an OIDC provider: `("oidc:<provider id>", "<sub claim>")`
 /// without a secret. One user can have several identities.
 pub mod identity {
     use sea_orm::entity::prelude::*;
@@ -378,6 +378,48 @@ pub mod plugin_job {
         pub run_after: DateTimeUtc,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// An external login service (OpenID Connect) set up by the administrator.
+/// Its users log in as identities `("oidc:<id>", "<sub claim>")`.
+pub mod oidc_provider {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "oidc_providers")]
+    pub struct Model {
+        /// Short name in addresses and identities (`company`); never changes.
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: String,
+        /// Shown on the login button.
+        pub name: String,
+        /// The provider's address (`iss`); never changes, so the same `sub`
+        /// always means the same person.
+        pub issuer: String,
+        pub client_id: String,
+        /// Empty for a public client.
+        pub client_secret: String,
+        /// Space-separated, `openid` included.
+        pub scopes: String,
+        pub enabled: bool,
+        /// Create an account on the first login of someone unknown.
+        pub auto_create: bool,
+        /// On the first login, take the account with the same verified email.
+        pub link_by_email: bool,
+        /// The claim with the user's groups; dots go into objects
+        /// (`realm_access.roles`).
+        pub groups_claim: String,
+        /// JSON list: when not empty, only members of these groups (or of
+        /// `admin_groups`) may log in.
+        pub user_groups: String,
+        /// JSON list: when not empty, members are administrators and the
+        /// others are not; decided again at every login.
+        pub admin_groups: String,
+        pub created_at: DateTimeUtc,
     }
 
     impl ActiveModelBehavior for ActiveModel {}

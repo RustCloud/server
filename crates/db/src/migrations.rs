@@ -22,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(Trash),
             Box::new(FileVersions),
             Box::new(FileLocks),
+            Box::new(OidcProviders),
         ]
     }
 }
@@ -491,6 +492,42 @@ impl MigrationTrait for FileLocks {
             )
             .await?;
         create_index(manager, "file_locks", &["expires_at"], false).await
+    }
+}
+
+/// External login services (OpenID Connect) the administrator set up
+/// (`oidc_providers`).
+struct OidcProviders;
+
+impl MigrationName for OidcProviders {
+    fn name(&self) -> &str {
+        "m0013_oidc_providers"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for OidcProviders {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table("oidc_providers")
+                    .col(string("id").primary_key())
+                    .col(string("name"))
+                    .col(string("issuer"))
+                    .col(string("client_id"))
+                    .col(text("client_secret"))
+                    .col(string("scopes"))
+                    .col(boolean("enabled"))
+                    .col(boolean("auto_create"))
+                    .col(boolean("link_by_email"))
+                    .col(string("groups_claim"))
+                    .col(text("user_groups"))
+                    .col(text("admin_groups"))
+                    .col(timestamp_with_time_zone("created_at"))
+                    .to_owned(),
+            )
+            .await
     }
 }
 

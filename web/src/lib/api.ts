@@ -52,6 +52,44 @@ export interface AuthStatus {
   providers: string[];
 }
 
+/** A login service on the login page (`GET /api/v1/auth/oidc`). */
+export interface OidcButton {
+  id: string;
+  name: string;
+}
+
+/** A way to log in to the caller's account: `password` or `oidc:<service id>`. */
+export interface LinkedLogin {
+  id: string;
+  provider: string;
+  created_at: string;
+}
+
+/** What the administrator sets for an OpenID Connect login service. */
+export interface OidcProviderInput {
+  id?: string;
+  name: string;
+  issuer?: string;
+  client_id: string;
+  /** Empty keeps the saved secret. */
+  client_secret?: string;
+  scopes: string;
+  enabled: boolean;
+  auto_create: boolean;
+  link_by_email: boolean;
+  groups_claim: string;
+  user_groups: string[];
+  admin_groups: string[];
+}
+
+/** A login service as the administrator sees it; the secret never comes back. */
+export interface OidcProvider extends Required<Omit<OidcProviderInput, 'client_secret'>> {
+  has_secret: boolean;
+  created_at: string;
+  /** The address to register at the service. */
+  redirect_url: string;
+}
+
 /** An app of the server, as described by its manifest (`GET /api/v1/apps`). */
 export interface AppManifest {
   id: string;
@@ -511,6 +549,13 @@ export const api = {
     request<void>('POST', '/api/v1/auth/password', { current_password, new_password, revoke_app_passwords }),
   /** Ends all sessions of the user except this one. */
   logoutOthers: () => request<{ ended: number }>('POST', '/api/v1/auth/logout-others'),
+  oidcButtons: () => request<OidcButton[]>('GET', '/api/v1/auth/oidc'),
+  /** The browser goes here to log in through a service. */
+  oidcLoginUrl: (id: string) => `/api/v1/auth/oidc/${enc(id)}/login`,
+  /** Starts adding a service to the account; the browser then goes to `url`. */
+  oidcLink: (id: string) => request<{ url: string }>('POST', `/api/v1/auth/oidc/${enc(id)}/link`),
+  linkedLogins: () => request<LinkedLogin[]>('GET', '/api/v1/auth/logins'),
+  unlinkLogin: (id: string) => request<void>('DELETE', `/api/v1/auth/logins/${id}`),
 
   // Files
   root: () => request<FileNode>('GET', '/api/v1/files/root'),
@@ -565,6 +610,11 @@ export const api = {
   // Administration
   system: () => request<SystemInfo>('GET', '/api/v1/admin/system'),
   settings: () => request<SettingsSection[]>('GET', '/api/v1/admin/settings'),
+  oidcProviders: () => request<OidcProvider[]>('GET', '/api/v1/admin/oidc'),
+  addOidcProvider: (input: OidcProviderInput) => request<OidcProvider>('POST', '/api/v1/admin/oidc', input),
+  changeOidcProvider: (id: string, input: OidcProviderInput) =>
+    request<OidcProvider>('PUT', `/api/v1/admin/oidc/${enc(id)}`, input),
+  removeOidcProvider: (id: string) => request<void>('DELETE', `/api/v1/admin/oidc/${enc(id)}`),
   plugins: () => request<Plugin[]>('GET', '/api/v1/admin/plugins'),
   ffmpegStatus: () => request<FfmpegStatus>('GET', '/api/v1/admin/use/ffmpeg'),
   onnxStatus: () => request<OnnxStatus>('GET', '/api/v1/admin/use/onnx'),

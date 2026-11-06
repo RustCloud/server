@@ -6,6 +6,7 @@
   import type { Component } from 'svelte';
   import SettingsForm from '../components/SettingsForm.svelte';
   import JournalPanel from '../components/JournalPanel.svelte';
+  import OidcPanel from '../components/OidcPanel.svelte';
   import PluginsPanel from '../components/PluginsPanel.svelte';
   import SystemPanel from '../components/SystemPanel.svelte';
   import AdminUsers from './AdminUsers.svelte';
@@ -24,7 +25,7 @@
   const section = $derived(sections.find((s) => s.name === tab));
 
   /** Extra panels shown above a section's settings (later e.g. S3 storages, call servers). */
-  const panels: Record<string, Component> = { plugins: PluginsPanel, journal: JournalPanel };
+  const panels: Record<string, Component> = { accounts: OidcPanel, plugins: PluginsPanel, journal: JournalPanel };
   const Panel = $derived(panels[tab]);
 </script>
 

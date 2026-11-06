@@ -21,6 +21,11 @@
 | `WRONG_PASSWORD`       | неверный текущий пароль при смене                       |
 | `UNKNOWN_PROVIDER`     | нет такого способа входа                                |
 | `CANNOT_CHANGE_SELF`   | администратор отключает или понижает себя               |
+| `CANNOT_UNLINK_PASSWORD` | пароль нельзя отвязать как сервис входа               |
+| `LAST_LOGIN`           | это единственный способ входа в аккаунт                 |
+| `INVALID_OIDC_PROVIDER` | значение сервиса входа не прошло проверку — причина в `message` |
+| `OIDC_DISCOVERY_FAILED` | не удалось прочитать настройки сервиса по его issuer   |
+| `OIDC_WRONG_ADDRESS`   | привязка начата не на [`public_url`](../configuration.md#server) |
 | `ROOT_FOLDER`          | действие недоступно для корневой папки                  |
 | `NOT_A_FILE`           | у папки нет содержимого для скачивания                  |
 | `NOT_A_FOLDER`         | ожидалась папка                                         |
@@ -39,6 +44,9 @@
 | `UNAUTHORIZED`        | нет сессии или она истекла               |
 | `INVALID_CREDENTIALS` | неверные имя или пароль                  |
 
+Коды неудачного входа через сервис приходят не ответом API, а в адресе страницы
+(`?oidc_error=`) — [список](auth.md#вход-через-сервисы-oidc).
+
 Неверный [пароль приложения](app-passwords.md) — `401 UNAUTHORIZED` с `WWW-Authenticate: Basic`.
 
 ## 403 Forbidden
@@ -48,6 +56,7 @@
 | `FORBIDDEN`           | нужны права администратора                            |
 | `CSRF_CHECK_FAILED`   | нет `X-Requested-With` ([CSRF](README.md#csrf))       |
 | `REGISTRATION_CLOSED` | регистрация закрыта                                   |
+| `NO_ACCOUNT`          | сервис входа подтвердил человека, но аккаунта для него нет и создавать нельзя |
 | `ACCOUNT_DISABLED`    | аккаунт отключён (при входе — `401 INVALID_CREDENTIALS`) |
 | `NO_SERVICE_WORKER`   | плагин или его сервис пытается поставить service worker |
 | `PERMISSION_NOT_DECLARED` | приложение не объявило такой доступ в манифесте   |
@@ -60,7 +69,7 @@
 
 `FILE_NOT_FOUND`, `VERSION_NOT_FOUND`, `USER_NOT_FOUND`, `SHARE_NOT_FOUND` (в т.ч. истёкшая ссылка и закрытый
 [общий доступ](app-shares.md)),
-`SETTINGS_NOT_FOUND`, `APP_NOT_FOUND` (в т.ч. отключённый плагин), `PLUGIN_NOT_FOUND`, `GRANT_NOT_FOUND` (в т.ч. закончившаяся сессия), `APP_PASSWORD_NOT_FOUND`,
+`SETTINGS_NOT_FOUND`, `OIDC_PROVIDER_NOT_FOUND`, `LOGIN_NOT_FOUND`, `APP_NOT_FOUND` (в т.ч. отключённый плагин), `PLUGIN_NOT_FOUND`, `GRANT_NOT_FOUND` (в т.ч. закончившаяся сессия), `APP_PASSWORD_NOT_FOUND`,
 `NOT_FOUND` (нет такого API-маршрута).
 
 ## 409 Conflict
@@ -70,6 +79,8 @@
 | `NAME_TAKEN`       | в папке уже есть элемент с таким именем            |
 | `ALREADY_EXISTS`   | то же, обнаружено базой при одновременных запросах |
 | `USERNAME_TAKEN`   | имя пользователя занято                            |
+| `LOGIN_TAKEN`      | учётная запись сервиса входа привязана к другому аккаунту |
+| `OIDC_PROVIDER_EXISTS` | сервис входа с таким `id` уже есть             |
 | `FILE_LOCKED`      | файл редактируется в приложении, которое держит [блокировку](files.md#блокировки) |
 | `FILE_CHANGED`     | файл изменился после чтения (`If-Match`, `write-if-match`) |
 | `NOT_ENOUGH_SPACE` | мало места для теста скорости                      |

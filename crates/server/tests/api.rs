@@ -2182,3 +2182,256 @@ async fn the_activity_log_shows_who_did_what() {
     let bob = app.register("bob").await;
     assert_eq!(app.get("/api/v1/admin/journal", As::Browser(&bob)).await.status, StatusCode::FORBIDDEN);
 }
+
+/// A login service for tests: OpenID Connect discovery, keys and a token
+/// endpoint on a port of this machine. The test plays the user at the
+/// service: it reads the login request the server sent the browser with and
+/// gives a code for the claims it wants.
+struct TestIdp {
+    issuer: String,
+    /// By code: the claims of the ID token and the PKCE challenge it was asked with.
+    codes: Arc<std::sync::Mutex<std::collections::HashMap<String, (Value, String)>>>,
+}
+
+impl TestIdp {
+    async fn start() -> Self {
+        use openidconnect::core::{CoreJwsSigningAlgorithm, CoreRsaPrivateSigningKey};
+        use openidconnect::{JsonWebKeyId, PrivateSigningKey};
+        use sha2::{Digest, Sha256};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let key = Arc::new(
+            CoreRsaPrivateSigningKey::from_pem(
+                include_str!("data/oidc-test-key.pem"),
+                Some(JsonWebKeyId::new("test".into())),
+            )
+            .unwrap(),
+        );
+        let codes = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<String, (Value, String)>::new()));
+
+        let discovery = json!({
+            "issuer": issuer,
+            "authorization_endpoint": format!("{issuer}/authorize"),
+            "token_endpoint": format!("{issuer}/token"),
+            "jwks_uri": format!("{issuer}/jwks"),
+            "response_types_supported": ["code"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+        });
+        let jwks = json!({ "keys": [key.as_verification_key()] });
+        let token = {
+            let (codes, key) = (codes.clone(), key.clone());
+            move |headers: HeaderMap, axum::extract::Form(form): axum::extract::Form<Vec<(String, String)>>| {
+                let (codes, key) = (codes.clone(), key.clone());
+                async move {
+                    let field = |name: &str| form.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+                    let basic = format!("Basic {}", STANDARD.encode("rustcloud:s3cret"));
+                    if headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) != Some(basic.as_str()) {
+                        return (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": "invalid_client" })));
+                    }
+                    let Some((claims, challenge)) = field("code").and_then(|code| codes.lock().unwrap().remove(&code))
+                    else {
+                        return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": "invalid_grant" })));
+                    };
+                    let verifier = field("code_verifier").unwrap_or_default();
+                    let computed = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier));
+                    if computed != challenge {
+                        return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": "invalid_grant" })));
+                    }
+                    // The ID token, signed with the key of /jwks.
+                    let header = json!({ "alg": "RS256", "typ": "JWT", "kid": "test" });
+                    let encode = |v: &Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+                    let input = format!("{}.{}", encode(&header), encode(&claims));
+                    let signature = key.sign(&CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256, input.as_bytes()).unwrap();
+                    let id_token =
+                        format!("{input}.{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature));
+                    let reply = json!({ "access_token": "at", "token_type": "Bearer", "id_token": id_token });
+                    (StatusCode::OK, axum::Json(reply))
+                }
+            }
+        };
+        let remote = Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                axum::routing::get(move || async move { axum::Json(discovery) }),
+            )
+            .route("/jwks", axum::routing::get(move || async move { axum::Json(jwks) }))
+            .route("/token", axum::routing::post(token));
+        tokio::spawn(async move { axum::serve(listener, remote).await });
+        Self { issuer, codes }
+    }
+
+    /// Plays the user at the service for the login the server sent the
+    /// browser to (`location`): answers with a code for an ID token about
+    /// `sub` with `extra` claims. Returns the callback's query.
+    fn answer(&self, location: &str, sub: &str, extra: Value) -> String {
+        let url = url::Url::parse(location).unwrap();
+        assert!(location.starts_with(&format!("{}/authorize?", self.issuer)), "{location}");
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query["client_id"], "rustcloud");
+        assert_eq!(query["code_challenge_method"], "S256");
+        assert!(query["scope"].split(' ').any(|s| s == "openid"));
+        let now = chrono::Utc::now().timestamp();
+        let mut claims = json!({
+            "iss": self.issuer, "aud": "rustcloud", "sub": sub, "nonce": query["nonce"],
+            "iat": now, "exp": now + 300,
+        });
+        claims.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let code = uuid::Uuid::new_v4().to_string();
+        self.codes.lock().unwrap().insert(code.clone(), (claims, query["code_challenge"].clone()));
+        format!("code={code}&state={}", query["state"])
+    }
+}
+
+impl Reply {
+    /// A cookie (`name=value`) set by this response.
+    fn cookie(&self, name: &str) -> Option<String> {
+        self.headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(|v| v.split(';').next().unwrap().to_owned())
+            .find(|pair| pair.starts_with(&format!("{name}=")) && pair.len() > name.len() + 1)
+    }
+}
+
+/// Logs in at the service of the test as `sub` with `claims`; the reply of
+/// the callback (a redirect).
+async fn oidc_login(app: &TestApp, idp: &TestIdp, sub: &str, claims: Value) -> Reply {
+    let start = app.get("/api/v1/auth/oidc/corp/login", As::Anonymous).await;
+    assert_eq!(start.status, StatusCode::SEE_OTHER, "{}", start.text());
+    let flow = start.cookie("rustcloud_oidc").expect("the flow cookie");
+    let query = idp.answer(start.header(header::LOCATION), sub, claims);
+    app.send(
+        Method::GET,
+        &format!("/api/v1/auth/oidc/corp/callback?{query}"),
+        As::Anonymous,
+        Body::empty(),
+        &[(header::COOKIE, &flow)],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn users_log_in_through_an_openid_connect_service() {
+    let idp = TestIdp::start().await;
+    let app = TestApp::new().await;
+    let admin = app.register("admin").await;
+
+    // The administrator adds the service; the secret never comes back.
+    let provider = json!({
+        "id": "corp", "name": "Corp SSO", "issuer": idp.issuer, "client_id": "rustcloud",
+        "client_secret": "s3cret", "user_groups": ["staff"], "admin_groups": ["admins"],
+    });
+    let added = app.json(Method::POST, "/api/v1/admin/oidc", As::Browser(&admin), provider.clone()).await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.text());
+    let added = added.json();
+    assert_eq!(added["has_secret"], true);
+    assert!(added.get("client_secret").is_none());
+    assert_eq!(added["scopes"], "openid profile email");
+    assert_eq!(added["redirect_url"], "http://localhost/api/v1/auth/oidc/corp/callback");
+    let again = app.json(Method::POST, "/api/v1/admin/oidc", As::Browser(&admin), provider).await;
+    assert_eq!(again.json()["error"]["code"], "OIDC_PROVIDER_EXISTS");
+    let broken = json!({ "id": "nowhere", "name": "X", "issuer": "http://127.0.0.1:1", "client_id": "x" });
+    let broken = app.json(Method::POST, "/api/v1/admin/oidc", As::Browser(&admin), broken).await;
+    assert_eq!(broken.json()["error"]["code"], "OIDC_DISCOVERY_FAILED", "a service that can't be reached isn't added");
+    assert_eq!(app.get("/api/v1/auth/oidc", As::Anonymous).await.json(), json!([{ "id": "corp", "name": "Corp SSO" }]));
+
+    // A new member of staff gets an account on the first login, the same one later.
+    let alice = json!({ "preferred_username": "Alice", "name": "Alice Smith", "groups": ["staff"] });
+    let reply = oidc_login(&app, &idp, "id-alice", alice.clone()).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.header(header::LOCATION), "/");
+    let session = reply.cookie("rustcloud_session").expect("a session");
+    let me = app.get("/api/v1/auth/me", As::Browser(&session)).await.json();
+    assert_eq!((me["username"].as_str(), me["display_name"].as_str()), (Some("alice"), Some("Alice Smith")));
+    assert_eq!(me["is_admin"], false);
+    let reply = oidc_login(&app, &idp, "id-alice", alice).await;
+    let session = reply.cookie("rustcloud_session").unwrap();
+    assert_eq!(app.get("/api/v1/auth/me", As::Browser(&session)).await.json()["id"], me["id"]);
+
+    // Groups decide who may log in and who is an administrator, at every login.
+    let reply = oidc_login(&app, &idp, "id-guest", json!({ "groups": ["guests"] })).await;
+    assert_eq!(reply.header(header::LOCATION), "/#/login?oidc_error=NOT_ALLOWED");
+    let reply = oidc_login(&app, &idp, "id-alice", json!({ "groups": ["staff", "admins"] })).await;
+    let session = reply.cookie("rustcloud_session").unwrap();
+    assert_eq!(app.get("/api/v1/auth/me", As::Browser(&session)).await.json()["is_admin"], true);
+    let reply = oidc_login(&app, &idp, "id-alice", json!({ "groups": ["staff"] })).await;
+    let session = reply.cookie("rustcloud_session").unwrap();
+    assert_eq!(app.get("/api/v1/auth/me", As::Browser(&session)).await.json()["is_admin"], false);
+
+    // Someone else's code or an old login logs nobody in; nor does a token for another login.
+    let start = app.get("/api/v1/auth/oidc/corp/login", As::Anonymous).await;
+    let query = idp.answer(start.header(header::LOCATION), "id-alice", json!({ "groups": ["staff"] }));
+    let stolen = app.get(&format!("/api/v1/auth/oidc/corp/callback?{query}"), As::Anonymous).await;
+    assert_eq!(stolen.header(header::LOCATION), "/#/login?oidc_error=OIDC_EXPIRED");
+    assert!(stolen.cookie("rustcloud_session").is_none());
+    let reply = oidc_login(&app, &idp, "id-alice", json!({ "groups": ["staff"], "nonce": "other" })).await;
+    assert_eq!(reply.header(header::LOCATION), "/#/login?oidc_error=OIDC_FAILED");
+    let cancelled = app.get("/api/v1/auth/oidc/corp/login", As::Anonymous).await;
+    let flow = cancelled.cookie("rustcloud_oidc").unwrap();
+    let state = url::Url::parse(cancelled.header(header::LOCATION))
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let uri = format!("/api/v1/auth/oidc/corp/callback?error=access_denied&state={state}");
+    let reply = app.send(Method::GET, &uri, As::Anonymous, Body::empty(), &[(header::COOKIE, &flow)]).await;
+    assert_eq!(reply.header(header::LOCATION), "/#/login?oidc_error=OIDC_CANCELLED");
+
+    // With linking by email, a verified email finds the existing account.
+    let bob = json!({ "username": "bob", "password": "password123", "email": "Bob@corp.example" });
+    app.json(Method::POST, "/api/v1/admin/users", As::Browser(&admin), bob).await;
+    let mut change = added.clone();
+    change["link_by_email"] = json!(true);
+    change["auto_create"] = json!(false);
+    let changed = app.json(Method::PUT, "/api/v1/admin/oidc/corp", As::Browser(&admin), change).await;
+    assert_eq!(changed.status, StatusCode::OK, "{}", changed.text());
+    assert_eq!(changed.json()["has_secret"], true, "an empty secret keeps the old one");
+    let unverified = json!({ "email": "bob@corp.example", "groups": ["staff"] });
+    let reply = oidc_login(&app, &idp, "id-bob", unverified).await;
+    assert_eq!(reply.header(header::LOCATION), "/#/login?oidc_error=NO_ACCOUNT", "unverified emails don't count");
+    let verified = json!({ "email": "bob@corp.example", "email_verified": true, "groups": ["staff"] });
+    let session = oidc_login(&app, &idp, "id-bob", verified).await.cookie("rustcloud_session").unwrap();
+    assert_eq!(app.get("/api/v1/auth/me", As::Browser(&session)).await.json()["username"], "bob");
+
+    // Users add the service to their account from the settings and remove it again.
+    let link = app.json(Method::POST, "/api/v1/auth/oidc/corp/link", As::Browser(&admin), json!({})).await;
+    assert_eq!(link.status, StatusCode::OK, "{}", link.text());
+    let flow = link.cookie("rustcloud_oidc").unwrap();
+    let query = idp.answer(link.json()["url"].as_str().unwrap(), "id-boss", json!({ "groups": ["admins"] }));
+    let uri = format!("/api/v1/auth/oidc/corp/callback?{query}");
+    let reply = app.send(Method::GET, &uri, As::Anonymous, Body::empty(), &[(header::COOKIE, &flow)]).await;
+    assert_eq!(reply.header(header::LOCATION), "/#/settings?oidc_linked=corp");
+    let session = oidc_login(&app, &idp, "id-boss", json!({ "groups": ["admins"] })).await;
+    let session = session.cookie("rustcloud_session").unwrap();
+    assert_eq!(app.get("/api/v1/auth/me", As::Browser(&session)).await.json()["username"], "admin");
+    let logins = app.get("/api/v1/auth/logins", As::Browser(&admin)).await.json();
+    let providers: Vec<&str> = logins.as_array().unwrap().iter().map(|l| l["provider"].as_str().unwrap()).collect();
+    assert_eq!(providers, ["password", "oidc:corp"]);
+    let password_id = logins[0]["id"].as_str().unwrap();
+    let removed = app
+        .send(Method::DELETE, &format!("/api/v1/auth/logins/{password_id}"), As::Browser(&admin), Body::empty(), &[])
+        .await;
+    assert_eq!(removed.json()["error"]["code"], "CANNOT_UNLINK_PASSWORD");
+    let oidc_id = logins[1]["id"].as_str().unwrap();
+    let removed = app
+        .send(Method::DELETE, &format!("/api/v1/auth/logins/{oidc_id}"), As::Browser(&admin), Body::empty(), &[])
+        .await;
+    assert_eq!(removed.status, StatusCode::NO_CONTENT);
+
+    // Only administrators manage services; removing one forgets its logins.
+    let alice = oidc_login(&app, &idp, "id-alice", json!({ "groups": ["staff"] })).await;
+    let alice = alice.cookie("rustcloud_session").unwrap();
+    assert_eq!(app.get("/api/v1/admin/oidc", As::Browser(&alice)).await.status, StatusCode::FORBIDDEN);
+    let listed = app.get("/api/v1/admin/oidc", As::Browser(&admin)).await.json();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    let gone = app.send(Method::DELETE, "/api/v1/admin/oidc/corp", As::Browser(&admin), Body::empty(), &[]).await;
+    assert_eq!(gone.status, StatusCode::NO_CONTENT);
+    assert_eq!(app.get("/api/v1/auth/oidc", As::Anonymous).await.json(), json!([]));
+    let start = app.get("/api/v1/auth/oidc/corp/login", As::Anonymous).await;
+    assert_eq!(start.header(header::LOCATION), "/#/login?oidc_error=OIDC_UNAVAILABLE");
+}

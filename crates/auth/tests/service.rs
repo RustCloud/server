@@ -343,3 +343,52 @@ async fn guessing_app_passwords_blocks_the_guesser_not_the_account() {
     assert!(blocked, "the guessing address is blocked");
     assert!(auth.app_password_user("alice", &created.password, phone).await.unwrap().is_some(), "alice's phone isn't");
 }
+
+fn external(subject: &str, admin: Option<bool>) -> rustcloud_auth::ExternalLogin {
+    rustcloud_auth::ExternalLogin {
+        identity: rustcloud_auth::Identity { provider: "oidc:corp".into(), subject: subject.into() },
+        username: Some("Admin".into()),
+        auto_create: true,
+        admin,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn external_logins_create_accounts_with_free_names_and_never_demote_the_last_admin() {
+    let (_db, auth) = auth().await;
+    auth.register(account("admin")).await.unwrap();
+
+    // "admin" is taken, so the new account gets the next free name.
+    let first = auth.sign_in_external(&external("sub-1", Some(true))).await.unwrap();
+    assert_eq!(first.user.username, "admin-2");
+    assert!(first.user.is_admin);
+
+    // Two administrators: the service may demote one…
+    let again = auth.sign_in_external(&external("sub-1", Some(false))).await.unwrap();
+    assert_eq!(again.user.id, first.user.id, "the same account");
+    assert!(!again.user.is_admin);
+
+    // …but not the last one.
+    let admin = auth.list_users().await.unwrap().into_iter().find(|u| u.username == "admin").unwrap();
+    auth.update_account(
+        &admin,
+        first.user.id,
+        rustcloud_auth::AccountUpdate { is_admin: Some(true), ..Default::default() },
+    )
+    .await
+    .unwrap();
+    auth.update_account(
+        &first.user,
+        admin.id,
+        rustcloud_auth::AccountUpdate { is_admin: Some(false), ..Default::default() },
+    )
+    .await
+    .unwrap();
+    let last = auth.sign_in_external(&external("sub-1", Some(false))).await.unwrap();
+    assert!(last.user.is_admin, "the last administrator stays one");
+
+    // Without automatic accounts, unknown people are turned away.
+    let closed = rustcloud_auth::ExternalLogin { auto_create: false, ..external("sub-2", None) };
+    assert_eq!(auth.sign_in_external(&closed).await.unwrap_err().code, "NO_ACCOUNT");
+}

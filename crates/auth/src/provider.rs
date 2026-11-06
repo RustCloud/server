@@ -10,7 +10,7 @@
 //! - An LDAP provider would implement [`CredentialProvider`] the same way.
 //! - Redirect-based logins (OIDC) don't fit a "check these credentials" call;
 //!   their callback handler builds an [`Identity`] from the ID token and calls
-//!   `Auth::sign_in` directly.
+//!   [`Auth::sign_in_external`](crate::Auth::sign_in_external).
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::secret;
 
 /// An account as confirmed by a login method.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Identity {
     /// Name of the login method, e.g. `"password"` or `"oidc:company"`.
     pub provider: String,
