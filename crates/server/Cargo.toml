@@ -58,5 +58,8 @@ zip.workspace = true
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
 http-body-util.workspace = true
+# The test login service makes its RSA signing key at start (no key in the repository).
+rand08 = { package = "rand", version = "0.8" }
+rsa = "0.9"
 rustcloud-db = { workspace = true, features = ["testing"] }
 rustcloud-wasm-host = { workspace = true, features = ["testing"] }

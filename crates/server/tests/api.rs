@@ -2201,13 +2201,14 @@ impl TestIdp {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let issuer = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        let key = Arc::new(
-            CoreRsaPrivateSigningKey::from_pem(
-                include_str!("data/oidc-test-key.pem"),
-                Some(JsonWebKeyId::new("test".into())),
-            )
-            .unwrap(),
-        );
+        // A fresh key every run: a private key in the repository would look
+        // like a leaked secret to scanners.
+        let pem = {
+            use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding};
+            let key = rsa::RsaPrivateKey::new(&mut rand08::rngs::OsRng, 2048).unwrap();
+            key.to_pkcs1_pem(LineEnding::LF).unwrap().to_string()
+        };
+        let key = Arc::new(CoreRsaPrivateSigningKey::from_pem(&pem, Some(JsonWebKeyId::new("test".into()))).unwrap());
         let codes = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<String, (Value, String)>::new()));
 
         let discovery = json!({
