@@ -14,6 +14,8 @@
   let error = $state('');
   let busy = $state(false);
   let services = $state<OidcButton[]>([]);
+  /** The page asked for (such as an app's /connect): login services bring the browser back to it. */
+  const returnTo = $derived(route.parts.length ? location.hash.slice(1) : undefined);
 
   api.status().then((s) => {
     status = s;
@@ -80,7 +82,7 @@
     {#if services.length && !registering}
       <p class="or muted small"><span>{t.orDivider}</span></p>
       {#each services as service (service.id)}
-        <a class="button service" href={api.oidcLoginUrl(service.id)}>{t.loginWith(service.name)}</a>
+        <a class="button service" href={api.oidcLoginUrl(service.id, returnTo)}>{t.loginWith(service.name)}</a>
       {/each}
     {/if}
 

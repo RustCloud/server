@@ -83,6 +83,33 @@ export interface OidcProviderInput {
   groups_claim: string;
   user_groups: string[];
   admin_groups: string[];
+  /** The longest a login through it lasts, devices included; 0: no limit. */
+  session_days: number;
+}
+
+/** A session of the account: a browser or a client app (device). */
+export interface SessionInfo {
+  id: string;
+  device: boolean;
+  /** The device's name, or the browser's User-Agent. */
+  name: string | null;
+  /** `password` or `oidc:<id>`. */
+  method: string | null;
+  ip: string | null;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string;
+  /** This browser's session. */
+  current: boolean;
+}
+
+/** What a client app asks for when it logs in a device (OAuth 2.0 with PKCE). */
+export interface AuthorizeRequest {
+  client_id: string;
+  device_name?: string;
+  redirect_uri: string;
+  code_challenge: string;
+  code_challenge_method: string;
 }
 
 /** A login service as the administrator sees it; the secret never comes back. */
@@ -554,11 +581,16 @@ export const api = {
   logoutOthers: () => request<{ ended: number }>('POST', '/api/v1/auth/logout-others'),
   oidcButtons: () => request<OidcButton[]>('GET', '/api/v1/auth/oidc'),
   /** The browser goes here to log in through a service. */
-  oidcLoginUrl: (id: string) => `/api/v1/auth/oidc/${enc(id)}/login`,
+  oidcLoginUrl: (id: string, returnTo?: string) =>
+    `/api/v1/auth/oidc/${enc(id)}/login${returnTo ? `?return=${enc(returnTo)}` : ''}`,
   /** Starts adding a service to the account; the browser then goes to `url`. */
   oidcLink: (id: string) => request<{ url: string }>('POST', `/api/v1/auth/oidc/${enc(id)}/link`),
   linkedLogins: () => request<LinkedLogin[]>('GET', '/api/v1/auth/logins'),
   unlinkLogin: (id: string) => request<void>('DELETE', `/api/v1/auth/logins/${id}`),
+  sessions: () => request<SessionInfo[]>('GET', '/api/v1/auth/sessions'),
+  endSession: (id: string) => request<void>('DELETE', `/api/v1/auth/sessions/${id}`),
+  /** Allows a client app; it gets the code through its redirect URI. */
+  authorize: (asked: AuthorizeRequest) => request<{ code: string }>('POST', '/api/v1/auth/authorize', asked),
 
   // Files
   root: () => request<FileNode>('GET', '/api/v1/files/root'),

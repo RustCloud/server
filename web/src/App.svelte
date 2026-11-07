@@ -12,6 +12,7 @@
   import Sidebar from './components/Sidebar.svelte';
   import TopBar from './components/TopBar.svelte';
   import Admin from './pages/Admin.svelte';
+  import Connect from './pages/Connect.svelte';
   import Files from './pages/Files.svelte';
   import Links from './pages/Links.svelte';
   import Login from './pages/Login.svelte';
@@ -80,6 +81,8 @@
           <Links />
         {:else if page === 'settings'}
           <Settings />
+        {:else if page === 'connect'}
+          <Connect />
         {:else if page === 'app' && route.parts[1]}
           <AppFrame
             id={route.parts[1]}

@@ -34,6 +34,7 @@
       groups_claim: 'groups',
       user_groups: [],
       admin_groups: [],
+      session_days: 30,
     };
   }
 
@@ -198,6 +199,11 @@
           <span class="muted small">{hint('admin_groups')}</span>
         </label>
       </div>
+      <label>
+        {label('session_days')}
+        <input type="number" min="0" max="3650" bind:value={form.session_days} />
+        <span class="muted small">{hint('session_days')}</span>
+      </label>
       {#each ['enabled', 'auto_create', 'link_by_email'] as const as key (key)}
         <label class="check">
           <input type="checkbox" bind:checked={form[key]} />

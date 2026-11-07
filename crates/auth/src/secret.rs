@@ -1,4 +1,4 @@
-//! Password hashing and session tokens.
+//! Password hashing, session tokens and signatures.
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -80,6 +80,23 @@ pub fn hash_token(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
+/// HMAC-SHA256 (RFC 2104) of `message` with `key`.
+pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut block = [0u8; 64];
+    match key.len() > 64 {
+        true => block[..32].copy_from_slice(&Sha256::digest(key)),
+        false => block[..key.len()].copy_from_slice(key),
+    }
+    let pad = |byte: u8| block.map(|b| b ^ byte);
+    let inner = Sha256::new().chain_update(pad(0x36)).chain_update(message).finalize();
+    Sha256::new().chain_update(pad(0x5c)).chain_update(inner).finalize().into()
+}
+
+/// Equal, in the same time whatever differs.
+pub fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +119,14 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.len(), 43);
         assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn hmac_matches_rfc_4231() {
+        // Test case 2: key "Jefe".
+        let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
     }
 
     #[test]

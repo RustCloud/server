@@ -38,6 +38,8 @@ pub struct ExternalLogin {
     pub link_by_email: bool,
     /// `Some` when the service decides administrator rights (by groups).
     pub admin: Option<bool>,
+    /// The longest its session (and the devices it allows) may last.
+    pub max_session_days: Option<u32>,
 }
 
 /// A way to log in to the caller's account, as the settings page lists it.
@@ -63,7 +65,7 @@ impl Auth {
         if let Some(admin) = login.admin {
             self.set_admin_from_service(user_id, admin, method).await?;
         }
-        let session = self.sign_in(&login.identity).await?;
+        let session = self.sign_in_for(&login.identity, login.max_session_days).await?;
         audit!("auth.login", user = session.user.username, method, "logged in");
         Ok(session)
     }

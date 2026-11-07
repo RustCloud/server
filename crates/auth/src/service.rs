@@ -15,13 +15,15 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::access::{is_access_token, AccessTokens};
+use crate::devices::{Codes, DEVICE};
 use crate::limiter::AttemptLimiter;
 use crate::provider::{CredentialProvider, Identity, PasswordProvider};
 use crate::secret;
 use crate::settings::AccountSettings;
 
 /// How long failed logins are remembered.
-const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
+pub(crate) const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// One IP address may fail this many times more often than one account
 /// (it may be shared by many users, e.g. behind NAT).
 pub(crate) const IP_FAILURE_FACTOR: u32 = 5;
@@ -99,6 +101,8 @@ pub struct AuthStatus {
 /// A freshly created session. The token is shown to the client once and never stored.
 #[derive(Debug, Clone, Serialize)]
 pub struct NewSession {
+    #[serde(skip)]
+    pub session_id: Uuid,
     pub token: String,
     pub expires_at: DateTime<Utc>,
     pub user: User,
@@ -109,6 +113,9 @@ pub struct NewSession {
 pub struct SessionUser {
     pub session_id: Uuid,
     pub user: User,
+    /// A client app with an access token rather than a browser: it can't
+    /// change how the account is logged into (see [`SessionUser::browser_only`]).
+    pub device: bool,
 }
 
 /// Accounts, login methods and sessions.
@@ -120,6 +127,9 @@ pub struct Auth {
     pub(crate) limiter: AttemptLimiter,
     /// Serialises registrations so that exactly one first user becomes admin.
     pub(crate) registration: Mutex<()>,
+    pub(crate) access: AccessTokens,
+    /// Codes of devices waiting to be exchanged for tokens.
+    pub(crate) codes: Codes,
 }
 
 impl Auth {
@@ -132,6 +142,8 @@ impl Auth {
             providers: vec![passwords.clone()],
             passwords,
             registration: Mutex::new(()),
+            access: AccessTokens::new_random(),
+            codes: Codes::default(),
             settings,
             db,
         }
@@ -261,6 +273,12 @@ impl Auth {
 
     /// Starts a session for a verified identity. Every login method ends here.
     pub async fn sign_in(&self, identity: &Identity) -> Result<NewSession> {
+        self.sign_in_for(identity, None).await
+    }
+
+    /// [`Self::sign_in`] for a login that may last at most `max_days`; so do
+    /// the devices it allows.
+    pub(crate) async fn sign_in_for(&self, identity: &Identity, max_days: Option<u32>) -> Result<NewSession> {
         let account = identity::Entity::find()
             .filter(identity::Column::Provider.eq(&identity.provider))
             .filter(identity::Column::Subject.eq(&identity.subject))
@@ -280,26 +298,48 @@ impl Auth {
             .await?;
 
         let token = secret::new_token();
+        let now = Utc::now();
         let session_days = self.settings.read(|s| s.session_days);
-        let expires_at = Utc::now() + chrono::Duration::days(i64::from(session_days));
-        session::ActiveModel {
+        let not_after = max_days.map(|days| now + chrono::Duration::days(i64::from(days)));
+        let expires_at = now + chrono::Duration::days(i64::from(session_days));
+        let expires_at = not_after.map_or(expires_at, |limit| expires_at.min(limit));
+        let row = session::ActiveModel {
             id: Set(Uuid::new_v4()),
             token_hash: Set(secret::hash_token(&token)),
             user_id: Set(user.id),
-            created_at: Set(Utc::now()),
+            created_at: Set(now),
             expires_at: Set(expires_at),
+            kind: Set(None),
+            name: Set(None),
+            method: Set(Some(identity.provider.clone())),
+            ip: Set(None),
+            last_used_at: Set(Some(now)),
+            not_after: Set(not_after),
+            previous_hash: Set(None),
+            rotated_at: Set(None),
         }
         .insert(&self.db)
         .await?;
 
-        Ok(NewSession { token, expires_at, user })
+        Ok(NewSession { session_id: row.id, token, expires_at, user })
     }
 
     /// Finds the user of a session token. Expired sessions and disabled users
     /// give `None`.
     pub async fn session_user(&self, token: &str) -> Result<Option<SessionUser>> {
+        self.authenticate(token, None).await
+    }
+
+    /// The user of a bearer token or session cookie: an access token of a
+    /// device or a browser session's token. Notes the use of the session.
+    pub async fn authenticate(&self, token: &str, ip: Option<IpAddr>) -> Result<Option<SessionUser>> {
+        if is_access_token(token) {
+            return self.device_user(token, ip).await;
+        }
         let Some(session) = session::Entity::find()
             .filter(session::Column::TokenHash.eq(secret::hash_token(token)))
+            // A device's refresh token is no session token.
+            .filter(session::Column::Kind.is_null())
             .filter(session::Column::ExpiresAt.gt(Utc::now()))
             .one(&self.db)
             .await?
@@ -310,7 +350,8 @@ impl Auth {
         if user.disabled {
             return Ok(None);
         }
-        Ok(Some(SessionUser { session_id: session.id, user }))
+        self.touch(&session, ip).await;
+        Ok(Some(SessionUser { session_id: session.id, user, device: false }))
     }
 
     /// The user of a session that is still valid, by the session's id (links
@@ -324,7 +365,8 @@ impl Auth {
             return Ok(None);
         };
         let user = self.find_user(session.user_id).await?;
-        Ok((!user.disabled).then_some(SessionUser { session_id: session.id, user }))
+        let device = session.kind.as_deref() == Some(DEVICE);
+        Ok((!user.disabled).then_some(SessionUser { session_id: session.id, user, device }))
     }
 
     /// Ends one session.

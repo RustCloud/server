@@ -23,7 +23,8 @@ JSON API под `/api/v1`. Маршруты собирает [server/src/lib.rs]
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/files/root
 ```
 
-Браузер вместо этого получает HttpOnly-cookie `rustcloud_session`. Программы вроде CalDAV-клиентов
+Клиентские приложения получают короткоживущий access-токен через браузер — см.
+[Вход приложений](auth.md#вход-приложений). Браузер вместо этого получает HttpOnly-cookie `rustcloud_session`. Программы вроде CalDAV-клиентов
 входят в плагины по Basic с [паролем приложения](app-passwords.md).
 
 ## CSRF

@@ -3,7 +3,9 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-use rustcloud_auth::{Access, AccountSettings, AccountUpdate, Auth, NewAccount, NewAppPassword, ProfileUpdate, Scope};
+use rustcloud_auth::{
+    Access, AccountSettings, AccountUpdate, Auth, AuthorizeRequest, NewAccount, NewAppPassword, ProfileUpdate, Scope,
+};
 use rustcloud_core::Live;
 use rustcloud_db::testing::{test_db, TestDb};
 
@@ -391,4 +393,102 @@ async fn external_logins_create_accounts_with_free_names_and_never_demote_the_la
     // Without automatic accounts, unknown people are turned away.
     let closed = rustcloud_auth::ExternalLogin { auto_create: false, ..external("sub-2", None) };
     assert_eq!(auth.sign_in_external(&closed).await.unwrap_err().code, "NO_ACCOUNT");
+}
+
+/// The PKCE pair of a test client: the verifier and its S256 challenge.
+fn pkce() -> (String, String) {
+    use base64::Engine;
+    use sha2::Digest;
+    let verifier = "a-verifier-of-a-client-app-that-is-long-enough-0123456789".to_owned();
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(&verifier));
+    (verifier, challenge)
+}
+
+const REDIRECT: &str = "http://127.0.0.1:53682/callback";
+
+fn request(challenge: &str) -> AuthorizeRequest {
+    AuthorizeRequest {
+        client_id: "RustCloud Desktop".into(),
+        device_name: Some("laptop".into()),
+        redirect_uri: REDIRECT.into(),
+        code_challenge: challenge.into(),
+        code_challenge_method: Some("S256".into()),
+    }
+}
+
+#[tokio::test]
+async fn devices_log_in_through_the_browser_and_renew_their_tokens() {
+    let (db, auth) = auth().await;
+    let alice = auth.create_user(account("alice"), false).await.unwrap();
+    let browser = auth.login("password", "alice", "password123", None).await.unwrap();
+    let browser = auth.session_user(&browser.token).await.unwrap().unwrap();
+    let (verifier, challenge) = pkce();
+
+    // The code works once, with the verifier and the same redirect URI.
+    let code = auth.authorize(&browser, &request(&challenge)).unwrap();
+    let wrong = auth.exchange_code(&code, "x".repeat(43).as_str(), REDIRECT, None).await;
+    assert_eq!(wrong.unwrap_err().code, "invalid_grant", "and a failed try uses it up");
+    let code = auth.authorize(&browser, &request(&challenge)).unwrap();
+    let other_uri = auth.exchange_code(&code, &verifier, "http://127.0.0.1:1/", None).await;
+    assert_eq!(other_uri.unwrap_err().code, "invalid_grant");
+    let code = auth.authorize(&browser, &request(&challenge)).unwrap();
+    let tokens = auth.exchange_code(&code, &verifier, REDIRECT, None).await.unwrap();
+    assert_eq!(auth.exchange_code(&code, &verifier, REDIRECT, None).await.unwrap_err().code, "invalid_grant");
+
+    let device = auth.authenticate(&tokens.access_token, None).await.unwrap().unwrap();
+    assert_eq!(device.user.id, alice.id);
+    assert!(device.device);
+    assert_eq!(device.browser_only().unwrap_err().code, "BROWSER_ONLY");
+    assert_eq!(auth.authorize(&device, &request(&challenge)).unwrap_err().code, "BROWSER_ONLY");
+    assert!(auth.session_user(&tokens.refresh_token).await.unwrap().is_none(), "a refresh token is no session");
+
+    let sessions = auth.sessions(&browser).await.unwrap();
+    assert_eq!(sessions.len(), 2);
+    let listed = sessions.iter().find(|s| s.device).unwrap();
+    assert_eq!(listed.name.as_deref(), Some("laptop (RustCloud Desktop)"));
+    assert_eq!(listed.method.as_deref(), Some("password"));
+
+    // Renewing replaces the refresh token; the old one works once more right
+    // after (a retry), later it ends the session.
+    let renewed = auth.refresh(&tokens.refresh_token, None).await.unwrap();
+    assert_ne!(renewed.refresh_token, tokens.refresh_token);
+    let retried = auth.refresh(&tokens.refresh_token, None).await.unwrap();
+    assert!(auth.refresh(&renewed.refresh_token, None).await.is_err(), "the retry replaced it");
+    assert!(auth.authenticate(&retried.access_token, None).await.unwrap().is_some());
+    let newest = auth.refresh(&retried.refresh_token, None).await.unwrap();
+
+    use sea_orm::EntityTrait;
+    rustcloud_db::session::Entity::update_many()
+        .col_expr(
+            rustcloud_db::session::Column::RotatedAt,
+            sea_orm::sea_query::Expr::value(chrono::Utc::now() - chrono::Duration::minutes(5)),
+        )
+        .exec(&db.conn)
+        .await
+        .unwrap();
+    assert_eq!(auth.refresh(&retried.refresh_token, None).await.unwrap_err().code, "invalid_grant");
+    assert!(auth.refresh(&newest.refresh_token, None).await.is_err(), "copied: the session is over");
+    assert!(auth.authenticate(&newest.access_token, None).await.unwrap().is_none(), "at once");
+}
+
+#[tokio::test]
+async fn ending_a_session_or_the_browser_one_stops_the_device() {
+    let (_db, auth) = auth().await;
+    auth.create_user(account("alice"), false).await.unwrap();
+    let login = auth.login("password", "alice", "password123", None).await.unwrap();
+    let browser = auth.session_user(&login.token).await.unwrap().unwrap();
+    let (verifier, challenge) = pkce();
+
+    let code = auth.authorize(&browser, &request(&challenge)).unwrap();
+    let tokens = auth.exchange_code(&code, &verifier, REDIRECT, None).await.unwrap();
+    let device = auth.authenticate(&tokens.access_token, None).await.unwrap().unwrap();
+    assert_eq!(auth.end_session(&device, browser.session_id).await.unwrap_err().code, "BROWSER_ONLY");
+    auth.end_session(&browser, device.session_id).await.unwrap();
+    assert!(auth.authenticate(&tokens.access_token, None).await.unwrap().is_none());
+    assert!(auth.refresh(&tokens.refresh_token, None).await.is_err());
+
+    // Logging out in the browser before the code is exchanged takes it back.
+    let code = auth.authorize(&browser, &request(&challenge)).unwrap();
+    auth.logout(browser.session_id).await.unwrap();
+    assert!(auth.exchange_code(&code, &verifier, REDIRECT, None).await.is_err());
 }

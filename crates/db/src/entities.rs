@@ -63,11 +63,29 @@ pub mod session {
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
+        /// Of the browser's session token, or of a device's refresh token.
         #[sea_orm(unique)]
         pub token_hash: String,
         pub user_id: Uuid,
         pub created_at: DateTimeUtc,
+        /// Moves forward when a device renews its tokens.
         pub expires_at: DateTimeUtc,
+        /// `None` for browsers, `device` for client apps.
+        pub kind: Option<String>,
+        /// The device's name, or the browser's User-Agent.
+        pub name: Option<String>,
+        /// How the login was made: `password`, `oidc:<id>`.
+        pub method: Option<String>,
+        /// Where it was last used from.
+        pub ip: Option<String>,
+        pub last_used_at: Option<DateTimeUtc>,
+        /// It never lasts beyond this, however often it is renewed (a login
+        /// service limits how long its logins last).
+        pub not_after: Option<DateTimeUtc>,
+        /// The device's refresh token before the last renewal, and when it
+        /// was replaced: used again, it shows that someone has a copy.
+        pub previous_hash: Option<String>,
+        pub rotated_at: Option<DateTimeUtc>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -423,6 +441,9 @@ pub mod oidc_provider {
         /// others are not; decided again at every login.
         pub admin_groups: String,
         pub created_at: DateTimeUtc,
+        /// The longest a login through it lasts, with the devices it allows,
+        /// before the user logs in at the service again; 0: no limit.
+        pub session_days: i32,
     }
 
     impl ActiveModelBehavior for ActiveModel {}

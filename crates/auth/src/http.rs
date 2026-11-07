@@ -4,10 +4,12 @@
 //! Other modules get the caller by adding [`CurrentUser`] (or [`AdminUser`])
 //! to a handler's arguments; they never deal with tokens or cookies.
 //!
-//! A client proves its session in one of two ways:
+//! A client proves its session in one of three ways:
 //! - browsers: the HttpOnly cookie [`SESSION_COOKIE`] set at login;
-//! - API clients: `Authorization: Bearer <token>`, the token from the reply
-//!   to login. Web pages don't get it there: a script on the page (say,
+//! - client apps (devices): `Authorization: Bearer <access token>`, a JWT
+//!   from `/api/v1/auth/token` (see [`crate::devices`]);
+//! - scripts: `Authorization: Bearer <token>`, the token from the reply to
+//!   login. Web pages don't get it there: a script on the page (say,
 //!   through an XSS hole) could otherwise take the session elsewhere.
 //!
 //! Cookie-authenticated requests that change something must also send the
@@ -17,10 +19,10 @@
 
 use std::sync::Arc;
 
-use axum::extract::{FromRef, FromRequestParts, Path, State};
+use axum::extract::{FromRef, FromRequestParts, Path, RawQuery, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -31,6 +33,7 @@ use rustcloud_core::{ClientInfo, Error, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::devices::{check_redirect_uri, AuthorizeRequest, Grant, SessionInfo};
 use crate::external::LinkedLogin;
 use crate::provider::PasswordProvider;
 use crate::service::{AccountUpdate, Auth, NewAccount, NewSession, ProfileUpdate, SessionUser, User};
@@ -68,8 +71,9 @@ where
         }
 
         let auth = Arc::<Auth>::from_ref(state);
+        let ip = parts.extensions.get::<ClientInfo>().and_then(|client| client.ip);
         let session = auth
-            .session_user(&token)
+            .authenticate(&token, ip)
             .await?
             .ok_or_else(|| Error::unauthorized("Session has expired, please log in again"))?;
         // Activity log entries of this request are attributed to this user.
@@ -94,6 +98,7 @@ where
         if !current.user().is_admin {
             return Err(Error::forbidden("Administrator rights required"));
         }
+        current.0.browser_only()?;
         Ok(Self(current))
     }
 }
@@ -146,6 +151,10 @@ where
         .route("/api/v1/auth/password", post(change_password))
         .route("/api/v1/auth/logins", get(linked_logins))
         .route("/api/v1/auth/logins/{id}", delete(unlink))
+        .route("/api/v1/auth/sessions", get(sessions))
+        .route("/api/v1/auth/sessions/{id}", delete(end_session))
+        .route("/api/v1/auth/authorize", get(authorize_page).post(authorize))
+        .route("/api/v1/auth/token", post(token))
         .route("/api/v1/admin/users", get(list_users).post(create_user))
         .route("/api/v1/admin/users/{id}", patch(update_user))
 }
@@ -163,6 +172,7 @@ async fn register(
     let password = account.password.clone();
     let user = auth.register(account).await?;
     let session = auth.login(PasswordProvider::NAME, &user.username, &password, client.ip).await?;
+    auth.describe_session(session.session_id, user_agent(&headers), client.ip).await;
     Ok((StatusCode::CREATED, start_session(session, client, &headers)))
 }
 
@@ -182,6 +192,7 @@ async fn login(
 ) -> Result<impl IntoResponse> {
     let provider = request.provider.as_deref().unwrap_or(PasswordProvider::NAME);
     let session = auth.login(provider, &request.username, &request.password, client.ip).await?;
+    auth.describe_session(session.session_id, user_agent(&headers), client.ip).await;
     Ok(start_session(session, client, &headers))
 }
 
@@ -224,8 +235,14 @@ async fn logout(State(auth): State<Arc<Auth>>, current: CurrentUser) -> Result<i
     Ok((jar, StatusCode::NO_CONTENT))
 }
 
+/// The `User-Agent` of a request, to tell its session apart in the list.
+pub fn user_agent(headers: &HeaderMap) -> Option<&str> {
+    headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok())
+}
+
 /// Ends all sessions of the caller except this one.
 async fn logout_others(State(auth): State<Arc<Auth>>, current: CurrentUser) -> Result<Json<LoggedOut>> {
+    current.0.browser_only()?;
     Ok(Json(LoggedOut { ended: auth.logout_others(&current.0).await? }))
 }
 
@@ -261,6 +278,7 @@ async fn change_password(
     current: CurrentUser,
     Json(change): Json<PasswordChange>,
 ) -> Result<StatusCode> {
+    current.0.browser_only()?;
     auth.change_password(&current.0, &change.current_password, &change.new_password, change.revoke_app_passwords)
         .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -272,8 +290,112 @@ async fn linked_logins(State(auth): State<Arc<Auth>>, current: CurrentUser) -> R
 }
 
 async fn unlink(State(auth): State<Arc<Auth>>, current: CurrentUser, Path(id): Path<Uuid>) -> Result<StatusCode> {
+    current.0.browser_only()?;
     auth.unlink_identity(current.user(), id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The caller's sessions: browsers and devices.
+async fn sessions(State(auth): State<Arc<Auth>>, current: CurrentUser) -> Result<Json<Vec<SessionInfo>>> {
+    Ok(Json(auth.sessions(&current.0).await?))
+}
+
+async fn end_session(State(auth): State<Arc<Auth>>, current: CurrentUser, Path(id): Path<Uuid>) -> Result<StatusCode> {
+    auth.end_session(&current.0, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/v1/auth/authorize?…`: the authorization endpoint a client app
+/// opens in the browser. The page that asks the user is the web UI's, so
+/// this only checks the request and passes it on there.
+async fn authorize_page(RawQuery(query): RawQuery) -> Response {
+    let query = query.unwrap_or_default();
+    let request: std::result::Result<AuthorizeRequest, _> = serde_urlencoded::from_str(&query);
+    // A wrong redirect URI must not get anything sent to it.
+    let valid = request.as_ref().is_ok_and(|r| check_redirect_uri(&r.redirect_uri).is_ok());
+    if !valid {
+        return Redirect::to("/#/connect?invalid=1").into_response();
+    }
+    Redirect::to(&format!("/#/connect?{query}")).into_response()
+}
+
+#[derive(Serialize)]
+struct Code {
+    code: String,
+}
+
+/// `POST /api/v1/auth/authorize`: the user allowed the device on the
+/// consent page; the page sends the browser to the app with this code.
+async fn authorize(
+    State(auth): State<Arc<Auth>>,
+    current: CurrentUser,
+    Json(request): Json<AuthorizeRequest>,
+) -> Result<Json<Code>> {
+    Ok(Json(Code { code: auth.authorize(&current.0, &request)? }))
+}
+
+/// A request to the token endpoint (`application/x-www-form-urlencoded`,
+/// as OAuth 2.0 says; JSON works too).
+#[derive(Deserialize)]
+struct TokenRequest {
+    grant_type: String,
+    code: Option<String>,
+    code_verifier: Option<String>,
+    redirect_uri: Option<String>,
+    refresh_token: Option<String>,
+}
+
+/// `POST /api/v1/auth/token`: a code or a refresh token for a new pair of
+/// tokens. Errors are in the OAuth 2.0 format (`{"error": "invalid_grant"}`).
+async fn token(
+    State(auth): State<Arc<Auth>>,
+    client: ClientInfo,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"));
+    let request: std::result::Result<TokenRequest, String> = match json {
+        true => serde_json::from_slice(&body).map_err(|err| err.to_string()),
+        false => serde_urlencoded::from_bytes(&body).map_err(|err| err.to_string()),
+    };
+    let result = match request {
+        Err(err) => Err(Error::bad_request("invalid_request", err)),
+        Ok(request) => auth.token_request(request.into_grant(), client.ip).await,
+    };
+    let no_store = [(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")];
+    match result {
+        Ok(tokens) => (no_store, Json(tokens)).into_response(),
+        Err(err) => {
+            let code = match err.code {
+                "invalid_request" | "invalid_grant" | "unsupported_grant_type" => err.code,
+                "TOO_MANY_ATTEMPTS" => "slow_down",
+                _ if err.kind == rustcloud_core::ErrorKind::Internal => "server_error",
+                _ => "invalid_grant",
+            };
+            let status = err.kind.status();
+            // Details of the server's own failures stay in its log.
+            let description = if code == "server_error" { "Internal error" } else { err.message.as_str() };
+            let body = serde_json::json!({"error": code, "error_description": description});
+            (status, no_store, Json(body)).into_response()
+        }
+    }
+}
+
+impl TokenRequest {
+    fn into_grant(self) -> Grant {
+        match self.grant_type.as_str() {
+            "authorization_code" => Grant::Code {
+                code: self.code.unwrap_or_default(),
+                verifier: self.code_verifier.unwrap_or_default(),
+                redirect_uri: self.redirect_uri.unwrap_or_default(),
+            },
+            "refresh_token" => Grant::Refresh(self.refresh_token.unwrap_or_default()),
+            other => Grant::Unsupported(other.to_owned()),
+        }
+    }
 }
 
 async fn list_users(State(auth): State<Arc<Auth>>, _admin: AdminUser) -> Result<Json<Vec<User>>> {

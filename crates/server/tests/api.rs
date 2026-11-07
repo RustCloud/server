@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::Router;
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use http_body_util::BodyExt;
 use rustcloud_db::testing::{test_db, TestDb};
@@ -260,6 +260,78 @@ async fn api_clients_use_bearer_tokens() {
     let me = app.json(Method::PATCH, "/api/v1/auth/me", As::Token(token), json!({ "email": "a@b.co" })).await;
     assert_eq!(me.status, StatusCode::OK, "no CSRF header is needed with a bearer token");
     assert_eq!(app.get("/api/v1/auth/me", As::Token("wrong")).await.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn client_apps_log_in_through_the_browser() {
+    use sha2::Digest;
+    let app = TestApp::new().await;
+    let cookie = app.register("admin").await;
+    let verifier = "verifier-of-the-desktop-client-0123456789-abcdefghij";
+    let challenge = URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier));
+    let redirect = "http://127.0.0.1:53682/callback";
+
+    let metadata = app.get("/.well-known/oauth-authorization-server", As::Anonymous).await.json();
+    assert_eq!(metadata["token_endpoint"], "http://localhost/api/v1/auth/token");
+
+    // The app opens the authorization endpoint; the consent page is the web UI's.
+    let query = format!(
+        "client_id=Desktop&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&state=xyz",
+        "http%3A%2F%2F127.0.0.1%3A53682%2Fcallback"
+    );
+    let page = app.get(&format!("/api/v1/auth/authorize?{query}"), As::Anonymous).await;
+    assert_eq!(page.header(header::LOCATION), format!("/#/connect?{query}"));
+    let elsewhere = query.replace("http%3A%2F%2F127.0.0.1%3A53682", "https%3A%2F%2Fevil.example");
+    let page = app.get(&format!("/api/v1/auth/authorize?{elsewhere}"), As::Anonymous).await;
+    assert_eq!(page.header(header::LOCATION), "/#/connect?invalid=1");
+
+    let asked = json!({
+        "client_id": "Desktop", "redirect_uri": redirect,
+        "code_challenge": challenge, "code_challenge_method": "S256",
+    });
+    let code = app.json(Method::POST, "/api/v1/auth/authorize", As::Browser(&cookie), asked.clone()).await.json();
+    let code = code["code"].as_str().unwrap();
+    let form = [(header::CONTENT_TYPE, "application/x-www-form-urlencoded")];
+    let body = format!("grant_type=authorization_code&code={code}&code_verifier={verifier}&redirect_uri={redirect}");
+    let reply = app.send(Method::POST, "/api/v1/auth/token", As::Anonymous, Body::from(body.clone()), &form).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(reply.header(header::CACHE_CONTROL), "no-store");
+    let tokens = reply.json();
+    let access = tokens["access_token"].as_str().unwrap();
+    assert_eq!(tokens["token_type"], "Bearer");
+
+    let again = app.send(Method::POST, "/api/v1/auth/token", As::Anonymous, Body::from(body), &form).await;
+    assert_eq!(again.status, StatusCode::BAD_REQUEST);
+    assert_eq!(again.json()["error"], "invalid_grant");
+
+    // The app works with files, but not with what would take the account.
+    assert_eq!(app.get("/api/v1/files/root", As::Token(access)).await.status, StatusCode::OK);
+    assert_eq!(app.get("/api/v1/admin/users", As::Token(access)).await.json()["error"]["code"], "BROWSER_ONLY");
+    let password = json!({ "current_password": "password123", "new_password": "another-password-1" });
+    let reply = app.json(Method::POST, "/api/v1/auth/password", As::Token(access), password).await;
+    assert_eq!(reply.json()["error"]["code"], "BROWSER_ONLY");
+    let reply = app.json(Method::POST, "/api/v1/auth/authorize", As::Token(access), asked).await;
+    assert_eq!(reply.json()["error"]["code"], "BROWSER_ONLY");
+
+    // A new pair for the refresh token, JSON works too.
+    let refresh = json!({ "grant_type": "refresh_token", "refresh_token": tokens["refresh_token"] });
+    let renewed = app.json(Method::POST, "/api/v1/auth/token", As::Anonymous, refresh).await;
+    assert_eq!(renewed.status, StatusCode::OK, "{}", renewed.text());
+    let unknown = json!({ "grant_type": "password", "username": "admin" });
+    let reply = app.json(Method::POST, "/api/v1/auth/token", As::Anonymous, unknown).await;
+    assert_eq!(reply.json()["error"], "unsupported_grant_type");
+
+    // Ending the session in the browser stops the app at once.
+    let sessions = app.get("/api/v1/auth/sessions", As::Browser(&cookie)).await.json();
+    let device = sessions.as_array().unwrap().iter().find(|s| s["device"] == true).unwrap();
+    assert_eq!(device["name"], "Desktop");
+    let uri = format!("/api/v1/auth/sessions/{}", device["id"].as_str().unwrap());
+    assert_eq!(
+        app.send(Method::DELETE, &uri, As::Browser(&cookie), Body::empty(), &[]).await.status,
+        StatusCode::NO_CONTENT
+    );
+    let access = renewed.json()["access_token"].as_str().unwrap().to_owned();
+    assert_eq!(app.get("/api/v1/files/root", As::Token(&access)).await.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

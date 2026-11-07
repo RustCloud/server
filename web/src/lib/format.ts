@@ -25,3 +25,27 @@ export function copyName(name: string, isDir: boolean): string {
   if (isDir || dot <= 0) return `${name} (copy)`;
   return `${name.slice(0, dot)} (copy)${name.slice(dot)}`;
 }
+
+/** A short name for a browser from its User-Agent: `Firefox, Linux`. */
+export function describeAgent(agent: string): string {
+  const browsers: [RegExp, string][] = [
+    [/Edg\//, 'Edge'],
+    [/OPR\/|Opera/, 'Opera'],
+    [/YaBrowser\//, 'Yandex Browser'],
+    [/Firefox\//, 'Firefox'],
+    [/Chrome\//, 'Chrome'],
+    [/Safari\//, 'Safari'],
+  ];
+  const systems: [RegExp, string][] = [
+    [/Android/, 'Android'],
+    [/iPhone|iPad/, 'iOS'],
+    [/Windows/, 'Windows'],
+    [/Mac OS X|Macintosh/, 'macOS'],
+    [/CrOS/, 'ChromeOS'],
+    [/Linux/, 'Linux'],
+  ];
+  const browser = browsers.find(([pattern]) => pattern.test(agent))?.[1];
+  const system = systems.find(([pattern]) => pattern.test(agent))?.[1];
+  if (!browser && !system) return agent.slice(0, 60);
+  return [browser, system].filter(Boolean).join(', ');
+}

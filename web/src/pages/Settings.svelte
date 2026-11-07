@@ -4,6 +4,7 @@
   import AppPasswords from '../components/AppPasswords.svelte';
   import AppShares from '../components/AppShares.svelte';
   import LoginMethods from '../components/LoginMethods.svelte';
+  import Sessions from '../components/Sessions.svelte';
   import { api, type Usage } from '../lib/api';
   import { formatBytes } from '../lib/format';
   import { errorText, t } from '../lib/i18n';
@@ -19,7 +20,6 @@
   let passwordMessage = $state('');
   let passwordError = $state(false);
   let revokeAppPasswords = $state(false);
-  let sessionsMessage = $state('');
   /** Accounts of login services may have no password to change. */
   let hasPassword = $state(true);
 
@@ -47,15 +47,6 @@
     } catch (e) {
       passwordError = true;
       passwordMessage = errorText(e);
-    }
-  }
-
-  async function logoutOthers() {
-    try {
-      const { ended } = await api.logoutOthers();
-      sessionsMessage = t.otherSessionsEnded(ended);
-    } catch (e) {
-      sessionsMessage = errorText(e);
     }
   }
 </script>
@@ -92,12 +83,7 @@
 
   <LoginMethods bind:hasPassword />
 
-  <section class="card">
-    <h2>{t.sessions}</h2>
-    <p class="muted small">{t.sessionsHint}</p>
-    <button type="button" onclick={logoutOthers}>{t.logoutOthers}</button>
-    {#if sessionsMessage}<p class="small">{sessionsMessage}</p>{/if}
-  </section>
+  <Sessions />
 
   {#if usage}
     <section class="card">

@@ -17,6 +17,7 @@ mod grants;
 pub mod journal;
 pub mod listen;
 pub mod network;
+mod oauth;
 mod oidc;
 mod plugin_catalog;
 mod plugin_jobs;
@@ -180,6 +181,7 @@ pub fn app(state: AppState) -> Router {
     let api = Router::new()
         .merge(rustcloud_auth::router())
         .merge(oidc::router())
+        .merge(oauth::router())
         .merge(rustcloud_files::router())
         .merge(grants::router())
         .merge(app_passwords::router())

@@ -33,6 +33,7 @@ async fn create(
     current: CurrentUser,
     Json(new): Json<NewAppPassword>,
 ) -> Result<(StatusCode, Json<CreatedAppPassword>)> {
+    current.0.browser_only()?;
     if let Some(scope) = new.scopes.iter().find(|scope| plugins.get(&scope.app).is_none()) {
         return Err(Error::not_found("APP_NOT_FOUND", format!("There is no app \"{}\"", scope.app)));
     }

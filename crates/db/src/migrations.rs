@@ -24,6 +24,7 @@ impl MigratorTrait for Migrator {
             Box::new(FileLocks),
             Box::new(OidcProviders),
             Box::new(FileMtime),
+            Box::new(DeviceSessions),
         ]
     }
 }
@@ -547,6 +548,40 @@ impl MigrationTrait for FileMtime {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let column = timestamp_with_time_zone_null("modified_at");
         manager.alter_table(Table::alter().table("nodes").add_column(column).to_owned()).await
+    }
+}
+
+/// Sessions of client apps (devices) next to those of browsers: their name,
+/// login method, last use, time limit and the refresh token they replaced;
+/// and the time limit of logins through each login service.
+struct DeviceSessions;
+
+impl MigrationName for DeviceSessions {
+    fn name(&self) -> &str {
+        "m0015_device_sessions"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for DeviceSessions {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // One column per statement: SQLite adds only one at a time.
+        let columns = [
+            string_null("kind"),
+            string_null("name"),
+            string_null("method"),
+            string_null("ip"),
+            timestamp_with_time_zone_null("last_used_at"),
+            timestamp_with_time_zone_null("not_after"),
+            string_null("previous_hash"),
+            timestamp_with_time_zone_null("rotated_at"),
+        ];
+        for column in columns {
+            manager.alter_table(Table::alter().table("sessions").add_column(column).to_owned()).await?;
+        }
+        create_index(manager, "sessions", &["previous_hash"], false).await?;
+        let limit = integer("session_days").default(30).to_owned();
+        manager.alter_table(Table::alter().table("oidc_providers").add_column(limit).to_owned()).await
     }
 }
 

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -35,7 +35,7 @@ use openidconnect::{
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
     PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
-use rustcloud_auth::{session_cookie, AdminUser, Auth, CurrentUser, ExternalLogin, Identity};
+use rustcloud_auth::{session_cookie, user_agent, AdminUser, Auth, CurrentUser, ExternalLogin, Identity};
 use rustcloud_core::{audit, ClientInfo, Error, Live, Result};
 use rustcloud_db::{oidc_provider, DatabaseConnection};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
@@ -87,6 +87,8 @@ struct Flow {
     pkce: PkceCodeVerifier,
     /// Add the identity to this account instead of logging in.
     link_to: Option<Uuid>,
+    /// The page of the web UI to go back to after logging in (see [`return_path`]).
+    return_to: Option<String>,
     at: Instant,
 }
 
@@ -105,6 +107,8 @@ pub struct ProviderView {
     pub groups_claim: String,
     pub user_groups: Vec<String>,
     pub admin_groups: Vec<String>,
+    /// The longest a login through it lasts, devices included; 0: no limit.
+    pub session_days: u32,
     pub created_at: DateTime<Utc>,
     /// The address to register at the service ("redirect URI").
     pub redirect_url: String,
@@ -136,10 +140,16 @@ pub struct ProviderInput {
     pub user_groups: Vec<String>,
     #[serde(default)]
     pub admin_groups: Vec<String>,
+    #[serde(default = "thirty")]
+    pub session_days: u32,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn thirty() -> u32 {
+    30
 }
 
 /// A service on the login page.
@@ -225,9 +235,11 @@ impl Oidc {
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.find(id).await?;
         oidc_provider::Entity::delete_by_id(id).exec(&self.db).await?;
-        let forgotten = self.auth.forget_identities(&format!("{PREFIX}{id}")).await?;
+        let method = format!("{PREFIX}{id}");
+        let forgotten = self.auth.forget_identities(&method).await?;
+        let sessions = self.auth.end_sessions_of(&method).await?;
         self.metadata.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
-        audit!("oidc.provider_remove", provider = id, logins = forgotten, "login service removed");
+        audit!("oidc.provider_remove", provider = id, logins = forgotten, sessions, "login service removed");
         Ok(())
     }
 
@@ -261,7 +273,13 @@ impl Oidc {
 
     /// Starts a login (or adding the service to `link_to`): the address of
     /// the service to send the browser to and the `state` for the cookie.
-    async fn start(&self, id: &str, base: &str, link_to: Option<Uuid>) -> Result<(String, String)> {
+    async fn start(
+        &self,
+        id: &str,
+        base: &str,
+        link_to: Option<Uuid>,
+        return_to: Option<String>,
+    ) -> Result<(String, String)> {
         let row = self.find(id).await?;
         if !row.enabled {
             return Err(Error::not_found("OIDC_PROVIDER_NOT_FOUND", "No such login service"));
@@ -278,7 +296,8 @@ impl Oidc {
         }
         let (url, state, nonce) = request.url();
 
-        let flow = Flow { provider: row.id, metadata, redirect_url, nonce, pkce, link_to, at: Instant::now() };
+        let flow =
+            Flow { provider: row.id, metadata, redirect_url, nonce, pkce, link_to, return_to, at: Instant::now() };
         let mut flows = self.flows.lock().unwrap_or_else(|e| e.into_inner());
         flows.retain(|_, flow| flow.at.elapsed() < FLOW_TIME);
         if flows.len() >= MAX_FLOWS {
@@ -372,8 +391,10 @@ impl Oidc {
             auto_create: row.auto_create,
             link_by_email: row.link_by_email,
             admin: rules.admin(&groups),
+            max_session_days: u32::try_from(row.session_days).ok().filter(|days| *days > 0),
         };
-        Ok(Finished::LoggedIn(Box::new(self.auth.sign_in_external(&login).await?)))
+        let session = self.auth.sign_in_external(&login).await?;
+        Ok(Finished::LoggedIn(Box::new(session), flow.return_to))
     }
 
     async fn userinfo(&self, url: &Url, access_token: &str) -> std::result::Result<Map<String, Value>, String> {
@@ -395,7 +416,8 @@ impl Oidc {
 }
 
 enum Finished {
-    LoggedIn(Box<rustcloud_auth::NewSession>),
+    /// With the page to go back to.
+    LoggedIn(Box<rustcloud_auth::NewSession>, Option<String>),
     Linked,
 }
 
@@ -440,6 +462,7 @@ struct Checked {
     enabled: bool,
     auto_create: bool,
     link_by_email: bool,
+    session_days: u32,
 }
 
 impl Checked {
@@ -467,6 +490,9 @@ impl Checked {
             claim if claim.len() <= 100 && claim.split('.').all(|part| !part.is_empty()) => claim.to_owned(),
             claim => return Err(invalid(format!("`{claim}` is not a claim name"))),
         };
+        if input.session_days > 3650 {
+            return Err(invalid("The session limit must be 0-3650 days"));
+        }
         Ok(Self {
             name,
             client_id,
@@ -477,6 +503,7 @@ impl Checked {
             enabled: input.enabled,
             auto_create: input.auto_create,
             link_by_email: input.link_by_email,
+            session_days: input.session_days,
         })
     }
 
@@ -490,6 +517,7 @@ impl Checked {
             auto_create: Set(self.auto_create),
             link_by_email: Set(self.link_by_email),
             groups_claim: Set(self.groups_claim),
+            session_days: Set(i32::try_from(self.session_days).unwrap_or(30)),
             user_groups: Set(serde_json::to_string(&self.user_groups).unwrap_or_default()),
             admin_groups: Set(serde_json::to_string(&self.admin_groups).unwrap_or_default()),
             ..Default::default()
@@ -548,6 +576,7 @@ fn view(row: oidc_provider::Model, base: &str) -> ProviderView {
         auto_create: row.auto_create,
         link_by_email: row.link_by_email,
         groups_claim: row.groups_claim,
+        session_days: u32::try_from(row.session_days).unwrap_or(0),
         created_at: row.created_at,
     }
 }
@@ -633,7 +662,7 @@ fn flow_error(code: &'static str, details: &str) -> Error {
 
 /// The address users reach the server at: the public URL, or the address of
 /// this request.
-fn base_url(server: &Live<ServerSettings>, client: ClientInfo, headers: &HeaderMap) -> String {
+pub(crate) fn base_url(server: &Live<ServerSettings>, client: ClientInfo, headers: &HeaderMap) -> String {
     let public = server.read(|s| s.public_url.trim_end_matches('/').to_owned());
     if !public.is_empty() {
         return public;
@@ -692,10 +721,19 @@ async fn login_buttons(State(oidc): State<Arc<Oidc>>) -> Result<Json<Vec<LoginBu
     Ok(Json(oidc.buttons().await?))
 }
 
-/// `GET /api/v1/auth/oidc/{id}/login`: sends the browser to the service.
+#[derive(Deserialize)]
+struct LoginParams {
+    /// The page of the web UI to come back to, such as `/connect?…`.
+    #[serde(rename = "return")]
+    return_to: Option<String>,
+}
+
+/// `GET /api/v1/auth/oidc/{id}/login[?return=/page]`: sends the browser to the service.
 async fn login(
     State(oidc): State<Arc<Oidc>>,
     Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    Query(params): Query<LoginParams>,
     client: ClientInfo,
     headers: HeaderMap,
 ) -> Response {
@@ -706,9 +744,11 @@ async fn login(
     // Start where the service will send the browser back, or the cookie
     // would be on another host.
     if !on_base_host(&base, &headers) {
-        return Redirect::to(&format!("{base}{FLOW_PATH}/{id}/login")).into_response();
+        let query = query.map(|q| format!("?{q}")).unwrap_or_default();
+        return Redirect::to(&format!("{base}{FLOW_PATH}/{id}/login{query}")).into_response();
     }
-    match oidc.start(&id, &base, None).await {
+    let return_to = params.return_to.as_deref().and_then(return_path);
+    match oidc.start(&id, &base, None, return_to).await {
         Ok((url, state)) => (CookieJar::new().add(flow_cookie(state, client)), Redirect::to(&url)).into_response(),
         Err(err) => {
             tracing::warn!("OIDC {id}: login not started: {}", err.message);
@@ -731,6 +771,7 @@ async fn link(
     client: ClientInfo,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse> {
+    current.0.browser_only()?;
     let base = base_url(&oidc.server, client, &headers);
     if !on_base_host(&base, &headers) {
         return Err(Error::bad_request(
@@ -738,7 +779,7 @@ async fn link(
             format!("Open the server at {base} to add this login method"),
         ));
     }
-    let (url, state) = oidc.start(&id, &base, Some(current.id())).await?;
+    let (url, state) = oidc.start(&id, &base, Some(current.id()), None).await?;
     Ok((CookieJar::new().add(flow_cookie(state, client)), Json(GoTo { url })))
 }
 
@@ -760,6 +801,7 @@ async fn callback(
     Query(answer): Query<Answer>,
     jar: CookieJar,
     client: ClientInfo,
+    headers: HeaderMap,
 ) -> Response {
     let cookie_state = jar.get(FLOW_COOKIE).map(|c| c.value().to_owned());
     let linking = cookie_state
@@ -768,9 +810,11 @@ async fn callback(
         .unwrap_or(false);
     let jar = CookieJar::new().add(removed_flow_cookie());
     match oidc.finish(&id, &answer, cookie_state.as_deref()).await {
-        Ok(Finished::LoggedIn(session)) => {
+        Ok(Finished::LoggedIn(session, return_to)) => {
+            oidc.auth.describe_session(session.session_id, user_agent(&headers), client.ip).await;
             let jar = jar.add(session_cookie(&session, client));
-            (jar, Redirect::to("/")).into_response()
+            let page = return_to.map_or_else(|| "/".to_owned(), |path| format!("/#{path}"));
+            (jar, Redirect::to(&page)).into_response()
         }
         Ok(Finished::Linked) => (jar, Redirect::to(&format!("/#/settings?oidc_linked={id}"))).into_response(),
         Err(err) => {
@@ -785,6 +829,13 @@ async fn callback(
             (jar, back_to_page(page, code)).into_response()
         }
     }
+}
+
+/// A page of the web UI to come back to after logging in (`/connect?…`), if
+/// it is one: it ends up after `/#`, so it can't lead to another site anyway.
+fn return_path(path: &str) -> Option<String> {
+    let fits = path.starts_with('/') && path.len() <= 2048 && !path.chars().any(|c| c.is_control());
+    fits.then(|| path.to_owned())
 }
 
 /// A page of the web UI with an error code to show.
@@ -880,6 +931,7 @@ mod tests {
             groups_claim: String::new(),
             user_groups: vec![],
             admin_groups: vec![],
+            session_days: 30,
         };
         assert_eq!(Checked::from_input(&input("")).unwrap().scopes, "openid profile email");
         assert_eq!(Checked::from_input(&input("email groups")).unwrap().scopes, "openid email groups");

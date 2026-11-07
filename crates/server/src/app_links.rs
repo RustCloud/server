@@ -47,7 +47,6 @@ use rustcloud_media::{Media, Piece, Priority, StreamMode};
 use rustcloud_wasm_host::{AppStorage, LinkTarget};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::app_tokens::AppTokens;
@@ -413,21 +412,7 @@ impl AppLinks {
     }
 }
 
-pub(crate) fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
-    let mut block = [0u8; 64];
-    match key.len() > 64 {
-        true => block[..32].copy_from_slice(&Sha256::digest(key)),
-        false => block[..key.len()].copy_from_slice(key),
-    }
-    let pad = |byte: u8| block.map(|b| b ^ byte);
-    let inner = Sha256::new().chain_update(pad(0x36)).chain_update(message).finalize();
-    Sha256::new().chain_update(pad(0x5c)).chain_update(inner).finalize().into()
-}
-
-/// Equal, in the same time whatever differs.
-pub(crate) fn same(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
-}
+pub(crate) use rustcloud_auth::{hmac_sha256, same};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -561,14 +546,6 @@ fn playlist(pieces: &[Piece]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hmac_matches_rfc_4231() {
-        // Test case 2: key "Jefe".
-        let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
-        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(hex, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
-    }
 
     #[test]
     fn a_playlist_lists_the_pieces() {

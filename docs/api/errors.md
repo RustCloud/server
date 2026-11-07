@@ -13,6 +13,7 @@
 | `INVALID_EMAIL`        | неверный email                                          |
 | `INVALID_QUOTA`        | отрицательная квота                                     |
 | `INVALID_EXPIRY`       | срок ссылки в прошлом                                   |
+| `invalid_request`      | неверный запрос входа приложения (`redirect_uri`, `code_challenge`…) — причина в `message` |
 | `INVALID_MTIME`        | `mtime` не разобрать, раньше 1970 года или больше чем на сутки вперёд |
 | `INVALID_SETTINGS`     | значение настройки не прошло проверку                   |
 | `INVALID_SCOPES`       | у пароля приложения нет приложений или одно дважды      |
@@ -56,6 +57,7 @@
 |-----------------------|-------------------------------------------------------|
 | `FORBIDDEN`           | нужны права администратора                            |
 | `CSRF_CHECK_FAILED`   | нет `X-Requested-With` ([CSRF](README.md#csrf))       |
+| `BROWSER_ONLY`        | приложению (access-токен) это нельзя — [вход приложений](auth.md#вход-приложений) |
 | `REGISTRATION_CLOSED` | регистрация закрыта                                   |
 | `NO_ACCOUNT`          | сервис входа подтвердил человека, но аккаунта для него нет и создавать нельзя |
 | `ACCOUNT_DISABLED`    | аккаунт отключён (при входе — `401 INVALID_CREDENTIALS`) |
@@ -70,7 +72,7 @@
 
 `FILE_NOT_FOUND`, `VERSION_NOT_FOUND`, `USER_NOT_FOUND`, `SHARE_NOT_FOUND` (в т.ч. истёкшая ссылка и закрытый
 [общий доступ](app-shares.md)),
-`SETTINGS_NOT_FOUND`, `OIDC_PROVIDER_NOT_FOUND`, `LOGIN_NOT_FOUND`, `APP_NOT_FOUND` (в т.ч. отключённый плагин), `PLUGIN_NOT_FOUND`, `GRANT_NOT_FOUND` (в т.ч. закончившаяся сессия), `APP_PASSWORD_NOT_FOUND`,
+`SETTINGS_NOT_FOUND`, `OIDC_PROVIDER_NOT_FOUND`, `LOGIN_NOT_FOUND`, `SESSION_NOT_FOUND`, `APP_NOT_FOUND` (в т.ч. отключённый плагин), `PLUGIN_NOT_FOUND`, `GRANT_NOT_FOUND` (в т.ч. закончившаяся сессия), `APP_PASSWORD_NOT_FOUND`,
 `NOT_FOUND` (нет такого API-маршрута).
 
 ## 409 Conflict
