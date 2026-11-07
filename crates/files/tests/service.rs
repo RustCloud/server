@@ -8,9 +8,9 @@ use futures_util::{stream, StreamExt};
 use rustcloud_auth::{Auth, NewAccount, User};
 use rustcloud_core::{ByteRange, ByteStream, Live};
 use rustcloud_db::testing::{test_db, TestDb};
-use rustcloud_db::{file_change, file_version, node, share};
+use rustcloud_db::{file_change, file_version, node, share, upload_session};
 use rustcloud_files::{
-    ChangeKind, Download, FileEventKind, Files, FilesSettings, GrantKind, Locking, NewGrant, NodeUpdate,
+    ChangeKind, Download, FileEventKind, Files, FilesSettings, GrantKind, Locking, NewGrant, NewUpload, NodeUpdate,
 };
 use rustcloud_plugin_api::{FileScope, Permissions};
 use rustcloud_storage_local::LocalBlobStore;
@@ -1133,4 +1133,107 @@ async fn a_user_holds_only_a_few_connections_for_changes() {
     assert!(s.files.watch_changes(&s.bob).is_ok(), "others are not counted against her");
     drop(open);
     assert!(s.files.watch_changes(&s.alice).is_ok());
+}
+
+fn sha256_of(text: &str) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha256::digest(text))
+}
+
+fn new_upload(name: &str, size: i64) -> NewUpload {
+    NewUpload { name: name.into(), size, overwrite: false, mtime: None }
+}
+
+#[tokio::test]
+async fn large_files_come_in_parts() {
+    let s = setup().await;
+    let root = s.files.root(&s.alice).await.unwrap();
+    let at = chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z").unwrap().to_utc();
+    let upload = NewUpload { mtime: Some(at), ..new_upload("big.txt", 11) };
+    let session = s.files.start_upload(&s.alice, root.id, upload).await.unwrap();
+    assert_eq!(session.received, 0);
+
+    let session = s.files.upload_part(&s.alice, session.id, 0, body("hello ")).await.unwrap();
+    assert_eq!(session.received, 6);
+    // A part sent again, or one from too far, is refused: parts come in order.
+    assert_eq!(code_of(s.files.upload_part(&s.alice, session.id, 0, body("hello ")).await), "WRONG_OFFSET");
+    assert_eq!(code_of(s.files.upload_part(&s.alice, session.id, 8, body("rld")).await), "WRONG_OFFSET");
+    // More than the size given: the part is dropped whole.
+    assert_eq!(code_of(s.files.upload_part(&s.alice, session.id, 6, body("world!")).await), "PART_TOO_LARGE");
+    assert_eq!(s.files.upload_info(&s.alice, session.id).await.unwrap().received, 6);
+    assert_eq!(
+        code_of(s.files.finish_upload(&s.alice, session.id, &sha256_of("hello world")).await),
+        "UPLOAD_INCOMPLETE"
+    );
+    s.files.upload_part(&s.alice, session.id, 6, body("world")).await.unwrap();
+
+    // Nobody else sees the session.
+    assert_eq!(code_of(s.files.upload_info(&s.bob, session.id).await), "UPLOAD_NOT_FOUND");
+    assert_eq!(code_of(s.files.finish_upload(&s.alice, session.id, "abc").await), "INVALID_CHECKSUM");
+
+    let file = s.files.finish_upload(&s.alice, session.id, &sha256_of("hello world")).await.unwrap();
+    assert_eq!((file.name.as_str(), file.size, file.modified_at), ("big.txt", 11, at));
+    assert_eq!(file.etag, Some(sha256_of("hello world")));
+    assert_eq!(read(s.files.download(&s.alice, file.id, None).await.unwrap()).await, "hello world");
+    assert_eq!(code_of(s.files.upload_info(&s.alice, session.id).await), "UPLOAD_NOT_FOUND", "the session is done");
+    assert_eq!(blob_count(s.blob_dir.path()), 1, "the parts are gone");
+
+    // The name is checked at the start and again at the end.
+    assert_eq!(code_of(s.files.start_upload(&s.alice, root.id, new_upload("big.txt", 1)).await), "NAME_TAKEN");
+    let late = s.files.start_upload(&s.alice, root.id, new_upload("late.txt", 1)).await.unwrap();
+    s.files.upload_part(&s.alice, late.id, 0, body("x")).await.unwrap();
+    s.files.upload(&s.alice, root.id, "late.txt", body("y"), false, None).await.unwrap();
+    assert_eq!(code_of(s.files.finish_upload(&s.alice, late.id, &sha256_of("x")).await), "NAME_TAKEN");
+    assert_eq!(s.files.upload_info(&s.alice, late.id).await.unwrap().received, 1, "the session stays");
+
+    // A wrong checksum ends the session.
+    let replace = NewUpload { overwrite: true, ..new_upload("late.txt", 1) };
+    let bad = s.files.start_upload(&s.alice, root.id, replace).await.unwrap();
+    s.files.upload_part(&s.alice, bad.id, 0, body("z")).await.unwrap();
+    assert_eq!(code_of(s.files.finish_upload(&s.alice, bad.id, &sha256_of("x")).await), "CHECKSUM_MISMATCH");
+    assert_eq!(code_of(s.files.upload_info(&s.alice, bad.id).await), "UPLOAD_NOT_FOUND");
+
+    s.files.cancel_upload(&s.alice, late.id).await.unwrap();
+    assert!(s.files.uploads(&s.alice).await.unwrap().is_empty());
+    assert_eq!(blob_count(s.blob_dir.path()), 2, "big.txt and late.txt, no parts");
+}
+
+#[tokio::test]
+async fn uploads_in_parts_take_their_size_of_the_quota_at_once() {
+    let s = setup().await;
+    let alice = User { quota_bytes: Some(20), ..s.alice.clone() };
+    let root = s.files.root(&alice).await.unwrap();
+    assert_eq!(code_of(s.files.start_upload(&alice, root.id, new_upload("a", 21)).await), "QUOTA_EXCEEDED");
+    let session = s.files.start_upload(&alice, root.id, new_upload("a", 15)).await.unwrap();
+    assert_eq!(code_of(s.files.start_upload(&alice, root.id, new_upload("b", 6)).await), "QUOTA_EXCEEDED");
+    let refused = s.files.upload(&alice, root.id, "c", body("123456"), false, None).await;
+    assert_eq!(code_of(refused), "QUOTA_EXCEEDED", "other uploads see the space taken");
+
+    s.files.upload_part(&alice, session.id, 0, body("123456789012345")).await.unwrap();
+    s.files.finish_upload(&alice, session.id, &sha256_of("123456789012345")).await.unwrap();
+    assert_eq!(s.files.usage(&alice).await.unwrap().used_bytes, 15);
+}
+
+#[tokio::test]
+async fn abandoned_uploads_in_parts_go() {
+    let s = setup().await;
+    let root = s.files.root(&s.alice).await.unwrap();
+    let mut sessions = Vec::new();
+    for n in 0..rustcloud_files::MAX_UPLOADS {
+        sessions.push(s.files.start_upload(&s.alice, root.id, new_upload(&format!("{n}"), 1)).await.unwrap());
+    }
+    assert_eq!(code_of(s.files.start_upload(&s.alice, root.id, new_upload("one more", 1)).await), "TOO_MANY_UPLOADS");
+    s.files.upload_part(&s.alice, sessions[0].id, 0, body("x")).await.unwrap();
+
+    assert_eq!(s.files.purge_uploads().await.unwrap(), 0, "nothing is old yet");
+    let long_ago = chrono::Utc::now() - rustcloud_files::ABANDONED_AFTER - chrono::Duration::minutes(1);
+    upload_session::Entity::update_many()
+        .col_expr(upload_session::Column::UpdatedAt, sea_orm::sea_query::Expr::value(long_ago))
+        .filter(upload_session::Column::Id.eq(sessions[0].id))
+        .exec(&s.db.conn)
+        .await
+        .unwrap();
+    assert_eq!(s.files.purge_uploads().await.unwrap(), 1);
+    assert_eq!(code_of(s.files.upload_info(&s.alice, sessions[0].id).await), "UPLOAD_NOT_FOUND");
+    assert_eq!(blob_count(s.blob_dir.path()), 0, "its part went with it");
 }

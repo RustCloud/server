@@ -2542,3 +2542,43 @@ async fn sync_clients_read_the_change_feed_and_hear_of_new_changes() {
     assert_eq!(stale.status, StatusCode::GONE);
     assert_eq!(stale.json()["error"]["code"], "CURSOR_EXPIRED");
 }
+
+#[tokio::test]
+async fn large_files_are_uploaded_in_parts() {
+    use sha2::Digest;
+    let app = TestApp::new().await;
+    let cookie = app.register("admin").await;
+    let root = app.root_id(&cookie).await;
+
+    let start = json!({ "name": "video.mp4", "size": 10, "mtime": "1700000000" });
+    let reply = app.json(Method::POST, &format!("/api/v1/files/{root}/uploads"), As::Browser(&cookie), start).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text());
+    let id = reply.json()["id"].as_str().unwrap().to_owned();
+    let uri = format!("/api/v1/files/uploads/{id}");
+
+    let (app, cookie) = (&app, cookie.as_str());
+    let part = |offset: u32, bytes: &'static str| {
+        let uri = format!("{uri}?offset={offset}");
+        async move { app.send(Method::PUT, &uri, As::Browser(cookie), Body::from(bytes), &[]).await }
+    };
+    assert_eq!(part(0, "01234").await.json()["received"], 5);
+    let again = part(0, "01234").await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+    assert_eq!(again.json()["error"]["code"], "WRONG_OFFSET");
+    // A client that restarted finds where it stopped.
+    let open = app.get("/api/v1/files/uploads", As::Browser(cookie)).await.json();
+    assert_eq!(open[0]["received"], 5);
+    part(5, "56789").await;
+
+    let sha256 = format!("{:x}", sha2::Sha256::digest("0123456789"));
+    let reply =
+        app.json(Method::POST, &format!("{uri}/finish"), As::Browser(cookie), json!({ "sha256": sha256 })).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text());
+    let file = reply.json();
+    assert_eq!(file["etag"], sha256.as_str());
+    assert_eq!(file["modified_at"], "2023-11-14T22:13:20Z");
+    let content =
+        app.get(&format!("/api/v1/files/{}/content", file["id"].as_str().unwrap()), As::Browser(cookie)).await;
+    assert_eq!(content.text(), "0123456789");
+    assert_eq!(app.get(&uri, As::Browser(cookie)).await.status, StatusCode::NOT_FOUND);
+}

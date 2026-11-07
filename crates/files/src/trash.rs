@@ -95,8 +95,8 @@ impl Files {
     }
 
     /// Every hour, removes what has been in the trash longer than
-    /// `[files] trash_days` (none when 0), versions no longer kept and old
-    /// entries of the change feed.
+    /// `[files] trash_days` (none when 0), versions no longer kept, abandoned
+    /// uploads in parts and old entries of the change feed.
     pub fn start_trash_cleanup(self: &Arc<Self>) {
         let files = self.clone();
         tokio::spawn(async move {
@@ -105,6 +105,11 @@ impl Files {
                 every.tick().await;
                 if let Err(err) = files.purge_locks().await {
                     tracing::warn!("locks: {err}");
+                }
+                match files.purge_uploads().await {
+                    Ok(0) => {}
+                    Ok(count) => tracing::info!("uploads: removed {count} abandoned uploads in parts"),
+                    Err(err) => tracing::warn!("uploads: {err}"),
                 }
                 if let Err(err) = files.purge_changes().await {
                     tracing::warn!("change feed: {err}");

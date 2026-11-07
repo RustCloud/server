@@ -15,6 +15,11 @@
 //! | GET    | `/files/{id}/children`     | folder contents                            |
 //! | POST   | `/files/{id}/folders`      | create a subfolder `{name}`                |
 //! | POST   | `/files/{id}/upload?name=` | upload a file (raw body), `&overwrite=true`|
+//! | POST   | `/files/{id}/uploads`      | start an upload in parts `{name, size}`    |
+//! | GET    | `/files/uploads`           | the user's uploads in parts under way      |
+//! | GET/DELETE | `/files/uploads/{u}`   | an upload in parts / cancel it             |
+//! | PUT    | `/files/uploads/{u}?offset=` | the next part (raw body)                 |
+//! | POST   | `/files/uploads/{u}/finish`| make the parts the file `{sha256}`         |
 //! | GET    | `/files/{id}/content`      | download (supports `Range`, `If-None-Match`)|
 //! | PUT    | `/files/{id}/content`      | replace file content (raw body)            |
 //! | PATCH  | `/files/{id}`              | rename / move `{name?, parent_id?}`        |
@@ -53,6 +58,7 @@ mod settings;
 mod shares;
 mod storage;
 mod trash;
+mod uploads;
 mod versions;
 
 pub use app::{manifest, FILES_INTERFACE_VERSION};
@@ -70,4 +76,5 @@ pub use settings::FilesSettings;
 pub use shares::{PublicView, Share};
 pub use storage::{SpeedTestResult, StorageReport, NEARLY_FULL_PERCENT, SPEED_TEST_BYTES};
 pub use trash::TRASH_FOLDER;
+pub use uploads::{NewUpload, Upload, ABANDONED_AFTER, MAX_PARTS, MAX_UPLOADS};
 pub use versions::{Version, Versions, SAVES_TOGETHER};

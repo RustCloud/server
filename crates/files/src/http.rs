@@ -25,6 +25,7 @@ use crate::content;
 use crate::service::{Files, Node, NodeUpdate, Usage};
 use crate::shares::{PublicView, Share};
 use crate::storage::{SpeedTestResult, StorageReport};
+use crate::uploads::{NewUpload, Upload};
 use crate::versions::Versions;
 
 /// Routes of the files module.
@@ -44,6 +45,10 @@ where
         .route("/api/v1/files/{id}/children", get(children))
         .route("/api/v1/files/{id}/folders", post(create_folder))
         .route("/api/v1/files/{id}/upload", post(upload))
+        .route("/api/v1/files/{id}/uploads", post(start_upload))
+        .route("/api/v1/files/uploads", get(uploads))
+        .route("/api/v1/files/uploads/{upload}", get(upload_info).put(upload_part).delete(cancel_upload))
+        .route("/api/v1/files/uploads/{upload}/finish", post(finish_upload))
         .route("/api/v1/files/{id}/content", get(download).put(replace_content))
         .route("/api/v1/files/{id}/copy", post(copy))
         .route("/api/v1/files/{id}/restore", post(restore))
@@ -134,6 +139,75 @@ async fn upload(
     let body = byte_stream(body);
     let node = files.upload(current.user(), parent_id, &params.name, body, params.overwrite, mtime).await?;
     Ok((StatusCode::CREATED, Json(node)))
+}
+
+#[derive(Deserialize)]
+struct StartUpload {
+    #[serde(flatten)]
+    upload: NewUpload,
+    /// See [`parse_mtime`].
+    mtime: Option<String>,
+}
+
+async fn start_upload(
+    State(files): State<Arc<Files>>,
+    current: CurrentUser,
+    Path(folder_id): Path<Uuid>,
+    Json(params): Json<StartUpload>,
+) -> Result<impl IntoResponse> {
+    let mtime = params.mtime.as_deref().map(parse_mtime).transpose()?;
+    let upload = NewUpload { mtime, ..params.upload };
+    Ok((StatusCode::CREATED, Json(files.start_upload(current.user(), folder_id, upload).await?)))
+}
+
+async fn uploads(State(files): State<Arc<Files>>, current: CurrentUser) -> Result<Json<Vec<Upload>>> {
+    Ok(Json(files.uploads(current.user()).await?))
+}
+
+async fn upload_info(
+    State(files): State<Arc<Files>>,
+    current: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Upload>> {
+    Ok(Json(files.upload_info(current.user(), id).await?))
+}
+
+#[derive(Deserialize)]
+struct PartParams {
+    offset: i64,
+}
+
+async fn upload_part(
+    State(files): State<Arc<Files>>,
+    current: CurrentUser,
+    Path(id): Path<Uuid>,
+    Query(params): Query<PartParams>,
+    body: Body,
+) -> Result<Json<Upload>> {
+    Ok(Json(files.upload_part(current.user(), id, params.offset, byte_stream(body)).await?))
+}
+
+#[derive(Deserialize)]
+struct FinishUpload {
+    sha256: String,
+}
+
+async fn finish_upload(
+    State(files): State<Arc<Files>>,
+    current: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(params): Json<FinishUpload>,
+) -> Result<impl IntoResponse> {
+    Ok((StatusCode::CREATED, Json(files.finish_upload(current.user(), id, &params.sha256).await?)))
+}
+
+async fn cancel_upload(
+    State(files): State<Arc<Files>>,
+    current: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode> {
+    files.cancel_upload(current.user(), id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]

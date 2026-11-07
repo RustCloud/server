@@ -16,6 +16,10 @@
 | `invalid_request`      | неверный запрос входа приложения (`redirect_uri`, `code_challenge`…) — причина в `message` |
 | `INVALID_MTIME`        | `mtime` не разобрать, раньше 1970 года или больше чем на сутки вперёд |
 | `INVALID_CURSOR`       | курсор [ленты изменений](files.md#лента-изменений) выдан не сервером |
+| `INVALID_SIZE`         | отрицательный размер [загрузки по частям](files.md#загрузка-по-частям) |
+| `INVALID_CHECKSUM`     | `sha256` — не 64 шестнадцатеричные цифры                |
+| `CHECKSUM_MISMATCH`    | собранный файл не совпал с `sha256` — загрузка удалена  |
+| `PART_TOO_LARGE`       | куски длиннее заявленного размера файла                 |
 | `INVALID_SETTINGS`     | значение настройки не прошло проверку                   |
 | `INVALID_SCOPES`       | у пароля приложения нет приложений или одно дважды      |
 | `INVALID_PLUGIN`       | архив плагина не подходит — причина в `message`         |
@@ -73,7 +77,7 @@
 
 `FILE_NOT_FOUND`, `VERSION_NOT_FOUND`, `USER_NOT_FOUND`, `SHARE_NOT_FOUND` (в т.ч. истёкшая ссылка и закрытый
 [общий доступ](app-shares.md)),
-`SETTINGS_NOT_FOUND`, `OIDC_PROVIDER_NOT_FOUND`, `LOGIN_NOT_FOUND`, `SESSION_NOT_FOUND`, `APP_NOT_FOUND` (в т.ч. отключённый плагин), `PLUGIN_NOT_FOUND`, `GRANT_NOT_FOUND` (в т.ч. закончившаяся сессия), `APP_PASSWORD_NOT_FOUND`,
+`SETTINGS_NOT_FOUND`, `OIDC_PROVIDER_NOT_FOUND`, `LOGIN_NOT_FOUND`, `SESSION_NOT_FOUND`, `UPLOAD_NOT_FOUND` (в т.ч. брошенная загрузка по частям), `APP_NOT_FOUND` (в т.ч. отключённый плагин), `PLUGIN_NOT_FOUND`, `GRANT_NOT_FOUND` (в т.ч. закончившаяся сессия), `APP_PASSWORD_NOT_FOUND`,
 `NOT_FOUND` (нет такого API-маршрута).
 
 ## 409 Conflict
@@ -90,6 +94,10 @@
 | `NOT_ENOUGH_SPACE` | мало места для теста скорости                      |
 | `CONFIG_FILE_INVALID` | файл настроек испорчен — исправьте его вручную  |
 | `PLUGIN_CANT_RUN`  | плагин не загрузился или его адрес занят другим    |
+| `WRONG_OFFSET`     | кусок не с того места — в `message` нужное смещение |
+| `UPLOAD_INCOMPLETE` | приняты не все байты загрузки по частям           |
+| `UPLOAD_FINISHING` | загрузка по частям уже собирается                  |
+| `TOO_MANY_PARTS`   | больше 10 000 кусков — нужны куски крупнее         |
 | `PLUGIN_EXISTS`    | плагин с таким `id` поставляется с сервером        |
 
 ## Прочие
@@ -107,6 +115,7 @@
 | 416    | —                   | `Range` вне файла (без JSON-тела)                  |
 | 429    | `TOO_MANY_ATTEMPTS` | слишком много неудачных входов                     |
 | 429    | `TOO_MANY_WATCHERS` | у пользователя уже 10 соединений `…/changes/watch`  |
+| 429    | `TOO_MANY_UPLOADS`  | у пользователя уже 20 незаконченных загрузок по частям |
 | 429    | `SERVER_BUSY`       | заняты все места для проверки паролей или запросов к плагинам |
 | 500    | `APP_FAILED`        | плагин упал, превысил память или время             |
 | 500    | `INTERNAL`          | ошибка сервера; подробности — в [журнале](../admin.md#журнал) |

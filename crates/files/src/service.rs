@@ -109,11 +109,16 @@ pub(crate) struct Writer<'a> {
     pub if_match: Option<&'a str>,
     /// The mtime of the new content (checked with [`check_mtime`]); `None`: now.
     pub mtime: Option<DateTime<Utc>>,
+    /// Bytes of the quota already set aside for this content (an upload in
+    /// parts that is finishing): they don't count against it twice.
+    pub reserved: i64,
+    /// The hex SHA-256 the content must have; `CHECKSUM_MISMATCH` otherwise.
+    pub sha256: Option<&'a str>,
 }
 
 impl<'a> Writer<'a> {
     pub fn user() -> Self {
-        Self { app: None, versioning: Versioning::Keep, if_match: None, mtime: None }
+        Self { app: None, versioning: Versioning::Keep, if_match: None, mtime: None, reserved: 0, sha256: None }
     }
 
     pub fn app(app_id: &'a str) -> Self {
@@ -203,7 +208,7 @@ impl Files {
 
     /// Free space on the storage's disk past [`DISK_RESERVE`]; `None` for a
     /// storage without a fixed size.
-    async fn disk_room(&self) -> Result<Option<u64>> {
+    pub(crate) async fn disk_room(&self) -> Result<Option<u64>> {
         Ok(self.blobs.capacity().await?.map(|disk| disk.free_bytes.saturating_sub(DISK_RESERVE)))
     }
 
@@ -305,7 +310,7 @@ impl Files {
             return Ok((self.write_content(user, existing, body, writer).await?, true));
         }
 
-        let stored = self.store(user, body, 0).await?;
+        let stored = self.store(user, body, writer.reserved, writer.sha256).await?;
         let mut file = new_node(parent.owner_id, Some(parent.id), name, false);
         file.size = Set(stored.size);
         file.mime_type = Set(Some(guess_mime(name)));
@@ -568,7 +573,7 @@ impl Files {
     }
 
     /// A folder the user may put things in: not in the trash.
-    async fn writable_folder(&self, user: &User, id: Uuid) -> Result<node::Model> {
+    pub(crate) async fn writable_folder(&self, user: &User, id: Uuid) -> Result<node::Model> {
         let folder = self.accessible_folder(user, id).await?;
         self.refuse_trash(&folder).await?;
         Ok(folder)
@@ -715,7 +720,7 @@ impl Files {
         if writer.if_match.is_some_and(|etag| file.sha256.as_deref() != Some(etag)) {
             return Err(file_changed());
         }
-        let stored = self.store(user, body, file.size).await?;
+        let stored = self.store(user, body, file.size + writer.reserved, writer.sha256).await?;
 
         let (old, updated) = match self.put_in_place(user, file, &stored, writer).await {
             Ok(done) => done,
@@ -812,7 +817,7 @@ impl Files {
     /// Other uploads of the user at the same time count against the quota
     /// too: what they have received so far, and what they stored once done.
     /// Uploads never take the last [`DISK_RESERVE`] of the disk (`STORAGE_FULL`).
-    async fn store(&self, user: &User, body: ByteStream, freed: i64) -> Result<StoredBlob> {
+    async fn store(&self, user: &User, body: ByteStream, freed: i64, sha256: Option<&str>) -> Result<StoredBlob> {
         let quota_limit = self.remaining_quota(user).await?.map(|remaining| remaining + freed);
         let size_limit = self.settings.read(FilesSettings::max_upload_bytes);
         let disk_limit = self.disk_room().await?.map(|room| i64::try_from(room).unwrap_or(i64::MAX));
@@ -847,18 +852,27 @@ impl Files {
         guard.stored = true;
         drop(guard);
         let meter = std::mem::take(&mut *meter.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
-        Ok(StoredBlob {
+        let stored = StoredBlob {
             key,
             size: i64::try_from(size).map_err(Error::internal)?,
             sha256: format!("{:x}", meter.hasher.finalize()),
-        })
+        };
+        if sha256.is_some_and(|expected| !expected.eq_ignore_ascii_case(&stored.sha256)) {
+            self.discard_blob(&stored.key).await;
+            return Err(Error::bad_request("CHECKSUM_MISMATCH", "The content doesn't have the SHA-256 given"));
+        }
+        Ok(stored)
     }
 
     /// Bytes the user may still store; `None` when there is no quota.
     /// Versions don't count here: they make room for files ([`Files::fit_quota`]).
-    async fn remaining_quota(&self, user: &User) -> Result<Option<i64>> {
+    /// Uploads in parts under way count with the size they declared.
+    pub(crate) async fn remaining_quota(&self, user: &User) -> Result<Option<i64>> {
         match user.quota_bytes {
-            Some(quota) => Ok(Some(std::cmp::max(quota - self.files_bytes(user.id).await?, 0))),
+            Some(quota) => {
+                let used = self.files_bytes(user.id).await? + self.reserved_bytes(user.id).await?;
+                Ok(Some(std::cmp::max(quota - used, 0)))
+            }
             None => Ok(None),
         }
     }

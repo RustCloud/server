@@ -209,6 +209,60 @@ pub mod share {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// A file being uploaded in parts: where it goes and how much has come.
+pub mod upload_session {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "upload_sessions")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner_id: Uuid,
+        /// The folder the file goes to (no foreign key: checked when finishing).
+        pub folder_id: Uuid,
+        pub name: String,
+        /// The size the client declared; counts against the quota at once.
+        pub size: i64,
+        /// Bytes received so far: the offset of the next part.
+        pub received: i64,
+        /// Number of parts received.
+        pub parts: i32,
+        /// Replace a file of that name.
+        pub overwrite: bool,
+        /// The mtime the file gets.
+        pub mtime: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+        /// Last part received; abandoned sessions go a day after it.
+        pub updated_at: DateTimeUtc,
+        /// When finishing began; no parts are taken meanwhile.
+        pub finishing_at: Option<DateTimeUtc>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// One received part of an upload in parts: a blob of its own.
+pub mod upload_part {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "upload_parts")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub session_id: Uuid,
+        /// Where the part starts in the file.
+        pub start: i64,
+        pub size: i64,
+        pub content_key: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 /// One entry of the change feed of sync clients: a file or folder of
 /// `owner_id` was created, changed, moved or deleted.
 pub mod file_change {

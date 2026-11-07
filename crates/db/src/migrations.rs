@@ -26,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(FileMtime),
             Box::new(DeviceSessions),
             Box::new(FileChanges),
+            Box::new(UploadSessions),
         ]
     }
 }
@@ -614,6 +615,58 @@ impl MigrationTrait for FileChanges {
             .await?;
         create_index(manager, "file_changes", &["owner_id", "id"], false).await?;
         create_index(manager, "file_changes", &["time"], false).await
+    }
+}
+
+/// Uploads in parts (`upload_sessions`) and the parts received so far
+/// (`upload_parts`, each one blob).
+struct UploadSessions;
+
+impl MigrationName for UploadSessions {
+    fn name(&self) -> &str {
+        "m0017_upload_sessions"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for UploadSessions {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table("upload_sessions")
+                    .col(pk_uuid("id"))
+                    .col(uuid("owner_id"))
+                    .col(uuid("folder_id"))
+                    .col(string("name"))
+                    .col(big_integer("size"))
+                    .col(big_integer("received"))
+                    .col(integer("parts"))
+                    .col(boolean("overwrite"))
+                    .col(timestamp_with_time_zone_null("mtime"))
+                    .col(timestamp_with_time_zone("created_at"))
+                    .col(timestamp_with_time_zone("updated_at"))
+                    .col(timestamp_with_time_zone_null("finishing_at"))
+                    .foreign_key(&mut cascade_fk("upload_sessions", "owner_id", "users"))
+                    .to_owned(),
+            )
+            .await?;
+        create_index(manager, "upload_sessions", &["owner_id"], false).await?;
+        create_index(manager, "upload_sessions", &["updated_at"], false).await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table("upload_parts")
+                    .col(pk_uuid("id"))
+                    .col(uuid("session_id"))
+                    .col(big_integer("start"))
+                    .col(big_integer("size"))
+                    .col(string("content_key"))
+                    .foreign_key(&mut cascade_fk("upload_parts", "session_id", "upload_sessions"))
+                    .to_owned(),
+            )
+            .await?;
+        create_index(manager, "upload_parts", &["session_id", "start"], true).await
     }
 }
 
