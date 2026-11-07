@@ -28,6 +28,8 @@
 //! | GET    | `/files/trash`             | the user's trash folder (`.trash`)         |
 //! | DELETE | `/files/trash`             | empty the trash                            |
 //! | GET    | `/files/search?q=`         | search by name                             |
+//! | GET    | `/files/changes?cursor=`   | change feed of sync clients                |
+//! | GET    | `/files/changes/watch`     | SSE: a hint whenever the feed has new ones |
 //! | GET    | `/usage`                   | used bytes and quota                       |
 //! | GET/POST | `/shares`                | list / create public links                 |
 //! | DELETE | `/shares/{id}`             | delete a public link                       |
@@ -40,6 +42,7 @@ mod app;
 mod app_files;
 mod app_shares;
 mod appdata;
+mod changes;
 pub mod content;
 mod events;
 mod grants;
@@ -55,6 +58,9 @@ mod versions;
 pub use app::{manifest, FILES_INTERFACE_VERSION};
 pub use app_shares::{AppShare, AppShares, NewAppShare, Person};
 pub use appdata::APPDATA_FOLDER;
+pub use changes::{
+    Change, ChangeKind, ChangePage, ChangeWatch, CHANGES_AT_ONCE, HINT_EVERY, KEEP_DAYS, MAX_WATCHERS, WATCH_TIME,
+};
 pub use events::{FileEvent, FileEventKind, WatchedFile};
 pub use grants::{Grant, GrantKind, NewGrant, CLOSE_GRACE, KEEP_ALIVE_EVERY, SESSION_IDLE, SESSION_MAX};
 pub use http::router;

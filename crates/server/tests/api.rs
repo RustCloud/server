@@ -2508,3 +2508,37 @@ async fn users_log_in_through_an_openid_connect_service() {
     let start = app.get("/api/v1/auth/oidc/corp/login", As::Anonymous).await;
     assert_eq!(start.header(header::LOCATION), "/#/login?oidc_error=OIDC_UNAVAILABLE");
 }
+
+#[tokio::test]
+async fn sync_clients_read_the_change_feed_and_hear_of_new_changes() {
+    let app = TestApp::new().await;
+    let cookie = app.register("admin").await;
+    let root = app.root_id(&cookie).await;
+    let start = app.get("/api/v1/files/changes", As::Browser(&cookie)).await.json();
+    let cursor = start["cursor"].as_str().unwrap().to_owned();
+
+    // The connection that waits for hints is open before the change.
+    let request = Request::get("/api/v1/files/changes/watch")
+        .header(header::COOKIE, &cookie)
+        .header("x-requested-with", "rustcloud")
+        .body(Body::empty())
+        .unwrap();
+    let watch = app.router.clone().oneshot(request).await.unwrap();
+    assert_eq!(watch.status(), StatusCode::OK);
+    assert_eq!(watch.headers()[header::CONTENT_TYPE], "text/event-stream");
+    let file = app.upload(&cookie, &root, "a.txt", "hello").await;
+
+    let mut events = watch.into_body();
+    let frame =
+        tokio::time::timeout(std::time::Duration::from_secs(10), events.frame()).await.unwrap().unwrap().unwrap();
+    let text = String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap();
+    assert!(text.contains("event: changes"), "{text}");
+
+    let page = app.get(&format!("/api/v1/files/changes?cursor={cursor}"), As::Browser(&cookie)).await.json();
+    assert_eq!(page["changes"], json!([{ "id": file["id"], "kind": "created" }]));
+    assert_eq!(page["more"], false);
+
+    let stale = app.get("/api/v1/files/changes?cursor=999999", As::Browser(&cookie)).await;
+    assert_eq!(stale.status, StatusCode::GONE);
+    assert_eq!(stale.json()["error"]["code"], "CURSOR_EXPIRED");
+}

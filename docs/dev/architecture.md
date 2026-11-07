@@ -95,8 +95,8 @@ TraceLayer → заголовки безопасности → network::guard �
 
 ## База
 
-Таблицы: `users`, `identities`, `sessions`, `nodes`, `shares`, `log_entries`
-([entities.rs](../../crates/db/src/entities.rs)). Миграции — только добавлять новые, старые не
+Таблицы: `users`, `identities`, `sessions`, `nodes`, `shares`, `log_entries`, `file_changes` и
+другие ([entities.rs](../../crates/db/src/entities.rs)). Миграции — только добавлять новые, старые не
 менять ([migrations.rs](../../crates/db/src/migrations.rs)). Схема проверяется на обеих СУБД
 ([db/tests/schema.rs](../../crates/db/tests/schema.rs)).
 

@@ -25,6 +25,7 @@ impl MigratorTrait for Migrator {
             Box::new(OidcProviders),
             Box::new(FileMtime),
             Box::new(DeviceSessions),
+            Box::new(FileChanges),
         ]
     }
 }
@@ -582,6 +583,37 @@ impl MigrationTrait for DeviceSessions {
         create_index(manager, "sessions", &["previous_hash"], false).await?;
         let limit = integer("session_days").default(30).to_owned();
         manager.alter_table(Table::alter().table("oidc_providers").add_column(limit).to_owned()).await
+    }
+}
+
+/// The change feed of sync clients (`file_changes`): what changed in whose
+/// files, in order. `node_id` has no foreign key: deleted files stay in it.
+struct FileChanges;
+
+impl MigrationName for FileChanges {
+    fn name(&self) -> &str {
+        "m0016_file_changes"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for FileChanges {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table("file_changes")
+                    .col(big_pk_auto("id"))
+                    .col(uuid("owner_id"))
+                    .col(uuid("node_id"))
+                    .col(string("kind"))
+                    .col(timestamp_with_time_zone("time"))
+                    .foreign_key(&mut cascade_fk("file_changes", "owner_id", "users"))
+                    .to_owned(),
+            )
+            .await?;
+        create_index(manager, "file_changes", &["owner_id", "id"], false).await?;
+        create_index(manager, "file_changes", &["time"], false).await
     }
 }
 

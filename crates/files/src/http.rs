@@ -1,12 +1,14 @@
 //! Routes of the files module: `/api/v1/files`, `/api/v1/shares`, `/api/v1/usage`
 //! and the public `/api/v1/public/{token}`.
 
+use std::convert::Infallible;
 use std::io;
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -15,8 +17,10 @@ use futures_util::TryStreamExt;
 use rustcloud_auth::{AdminUser, Auth, CurrentUser};
 use rustcloud_core::{ByteStream, Error, Result};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use uuid::Uuid;
 
+use crate::changes::{ChangePage, ChangeWatch, HINT_EVERY, WATCH_TIME};
 use crate::content;
 use crate::service::{Files, Node, NodeUpdate, Usage};
 use crate::shares::{PublicView, Share};
@@ -33,6 +37,8 @@ where
     Router::new()
         .route("/api/v1/files/root", get(root))
         .route("/api/v1/files/search", get(search))
+        .route("/api/v1/files/changes", get(changes))
+        .route("/api/v1/files/changes/watch", get(watch_changes))
         .route("/api/v1/files/trash", get(trash).delete(empty_trash))
         .route("/api/v1/files/{id}", get(details).patch(update).delete(remove))
         .route("/api/v1/files/{id}/children", get(children))
@@ -273,6 +279,49 @@ async fn search(
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Vec<Node>>> {
     Ok(Json(files.search(current.user(), &params.q).await?))
+}
+
+#[derive(Deserialize)]
+struct ChangesParams {
+    cursor: Option<String>,
+}
+
+async fn changes(
+    State(files): State<Arc<Files>>,
+    current: CurrentUser,
+    Query(params): Query<ChangesParams>,
+) -> Result<Json<ChangePage>> {
+    Ok(Json(files.changes(current.user(), params.cursor.as_deref()).await?))
+}
+
+/// Server-sent events: `changes` whenever the user's feed has new entries
+/// (at most one per [`HINT_EVERY`]); the connection ends after
+/// [`WATCH_TIME`]. The client reads the feed once connected and after each event.
+async fn watch_changes(State(files): State<Arc<Files>>, current: CurrentUser) -> Result<impl IntoResponse> {
+    let watch = files.watch_changes(current.user())?;
+    let deadline = tokio::time::Instant::now() + WATCH_TIME;
+    let events = futures_util::stream::unfold(watch, move |mut watch| async move {
+        let event = tokio::time::timeout_at(deadline, next_hint(&mut watch)).await.ok().flatten()?;
+        Some((Ok::<_, Infallible>(event), watch))
+    });
+    // Proxies such as nginx would otherwise hold the events back.
+    let headers = [("x-accel-buffering", "no"), (header::CACHE_CONTROL.as_str(), "no-store")];
+    Ok((headers, Sse::new(events).keep_alive(KeepAlive::default())))
+}
+
+/// Waits for a hint for the watching user, lets those that follow within
+/// [`HINT_EVERY`] join it, and makes it an event; `None` once the server stops.
+async fn next_hint(watch: &mut ChangeWatch) -> Option<Event> {
+    loop {
+        match watch.hints.recv().await {
+            Ok(user_id) if user_id != watch.user_id => continue,
+            Ok(_) | Err(RecvError::Lagged(_)) => break,
+            Err(RecvError::Closed) => return None,
+        }
+    }
+    tokio::time::sleep(HINT_EVERY).await;
+    while !matches!(watch.hints.try_recv(), Err(TryRecvError::Empty | TryRecvError::Closed)) {}
+    Some(Event::default().event("changes").data("new"))
 }
 
 async fn usage(State(files): State<Arc<Files>>, current: CurrentUser) -> Result<Json<Usage>> {

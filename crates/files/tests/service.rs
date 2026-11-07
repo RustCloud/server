@@ -8,8 +8,10 @@ use futures_util::{stream, StreamExt};
 use rustcloud_auth::{Auth, NewAccount, User};
 use rustcloud_core::{ByteRange, ByteStream, Live};
 use rustcloud_db::testing::{test_db, TestDb};
-use rustcloud_db::{file_version, node, share};
-use rustcloud_files::{Download, FileEventKind, Files, FilesSettings, GrantKind, Locking, NewGrant, NodeUpdate};
+use rustcloud_db::{file_change, file_version, node, share};
+use rustcloud_files::{
+    ChangeKind, Download, FileEventKind, Files, FilesSettings, GrantKind, Locking, NewGrant, NodeUpdate,
+};
 use rustcloud_plugin_api::{FileScope, Permissions};
 use rustcloud_storage_local::LocalBlobStore;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -1044,4 +1046,91 @@ async fn apps_read_the_versions_of_the_files_they_were_given() {
     assert_eq!(versions.len(), 1);
     let part = s.files.app_read_version(&s.alice, "office", doc.id, versions[0].id, 4, 100).await.unwrap();
     assert_eq!(part, b"text");
+}
+
+/// The change feed of alice after `cursor`: the entries and the next cursor.
+async fn feed(s: &Setup, cursor: &str) -> (Vec<(uuid::Uuid, ChangeKind)>, String) {
+    let page = s.files.changes(&s.alice, Some(cursor)).await.unwrap();
+    assert!(!page.more);
+    (page.changes.into_iter().map(|change| (change.id, change.kind)).collect(), page.cursor)
+}
+
+#[tokio::test]
+async fn sync_clients_follow_the_change_feed() {
+    use ChangeKind::{Changed, Created, Deleted, Moved};
+    let s = setup().await;
+    let root = s.files.root(&s.alice).await.unwrap();
+    let start = s.files.changes(&s.alice, None).await.unwrap();
+    assert!(start.changes.is_empty(), "without a cursor: only where to start");
+    let mut watch = s.files.watch_changes(&s.alice).unwrap();
+
+    let docs = s.files.create_folder(&s.alice, root.id, "Docs").await.unwrap();
+    let file = s.files.upload(&s.alice, docs.id, "a.txt", body("v1"), false, None).await.unwrap();
+    s.files.replace_content(&s.alice, file.id, body("v2"), None, None).await.unwrap();
+    let rename = NodeUpdate { name: Some("b.txt".into()), ..Default::default() };
+    s.files.update(&s.alice, file.id, rename).await.unwrap();
+    let touch = NodeUpdate { modified_at: Some(chrono::Utc::now()), ..Default::default() };
+    s.files.update(&s.alice, file.id, touch).await.unwrap();
+    let copy = s.files.copy(&s.alice, docs.id, root.id, Some("Docs 2")).await.unwrap();
+    s.files.delete(&s.alice, file.id).await.unwrap();
+    s.files.restore(&s.alice, file.id).await.unwrap();
+
+    // Hidden folders and what is in them are not in the feed: moving in is
+    // deleting, moving out is creating.
+    let hidden = s.files.create_folder(&s.alice, root.id, ".hidden").await.unwrap();
+    s.files.appdata_write(&s.alice, "notes", "list.json", b"[]".to_vec()).await.unwrap();
+    let hide = NodeUpdate { parent_id: Some(hidden.id), ..Default::default() };
+    s.files.update(&s.alice, file.id, hide).await.unwrap();
+    s.files.upload(&s.alice, hidden.id, "secret.txt", body("x"), false, None).await.unwrap();
+    let show = NodeUpdate { parent_id: Some(docs.id), ..Default::default() };
+    s.files.update(&s.alice, file.id, show).await.unwrap();
+    // Deleting for good what is in the trash already was deleted for clients.
+    s.files.delete(&s.alice, copy.id).await.unwrap();
+    s.files.delete(&s.alice, copy.id).await.unwrap();
+    // Bob's files are in his feed only.
+    let bobs = s.files.root(&s.bob).await.unwrap();
+    s.files.create_folder(&s.bob, bobs.id, "Bob's").await.unwrap();
+
+    let (changes, cursor) = feed(&s, &start.cursor).await;
+    let expected = [
+        (docs.id, Created),
+        (file.id, Created),
+        (file.id, Changed),
+        (file.id, Moved),
+        (file.id, Changed),
+        (copy.id, Created),
+        (file.id, Deleted),
+        (file.id, Created),
+        (file.id, Deleted),
+        (file.id, Created),
+        (copy.id, Deleted),
+    ];
+    assert_eq!(changes, expected);
+    assert_eq!(feed(&s, &cursor).await, (Vec::new(), cursor.clone()), "nothing new");
+    assert_eq!(watch.hints.try_recv().unwrap(), s.alice.id, "open connections hear of it");
+
+    assert_eq!(code_of(s.files.changes(&s.alice, Some("soon")).await), "INVALID_CURSOR");
+    let ahead = (cursor.parse::<i64>().unwrap() + 100).to_string();
+    assert_eq!(code_of(s.files.changes(&s.alice, Some(&ahead)).await), "CURSOR_EXPIRED");
+
+    // Old entries go; a cursor from before them can't be followed any more.
+    let long_ago = chrono::Utc::now() - chrono::Duration::days(rustcloud_files::KEEP_DAYS + 1);
+    file_change::Entity::update_many()
+        .col_expr(file_change::Column::Time, sea_orm::sea_query::Expr::value(long_ago))
+        .exec(&s.db.conn)
+        .await
+        .unwrap();
+    assert!(s.files.purge_changes().await.unwrap() > 0);
+    assert_eq!(code_of(s.files.changes(&s.alice, Some(&start.cursor)).await), "CURSOR_EXPIRED");
+    assert_eq!(feed(&s, &cursor).await.0, Vec::new(), "the latest entry stays, and with it the latest cursor");
+}
+
+#[tokio::test]
+async fn a_user_holds_only_a_few_connections_for_changes() {
+    let s = setup().await;
+    let open: Vec<_> = (0..rustcloud_files::MAX_WATCHERS).map(|_| s.files.watch_changes(&s.alice).unwrap()).collect();
+    assert_eq!(code_of(s.files.watch_changes(&s.alice)), "TOO_MANY_WATCHERS");
+    assert!(s.files.watch_changes(&s.bob).is_ok(), "others are not counted against her");
+    drop(open);
+    assert!(s.files.watch_changes(&s.alice).is_ok());
 }

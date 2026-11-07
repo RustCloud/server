@@ -209,6 +209,28 @@ pub mod share {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// One entry of the change feed of sync clients: a file or folder of
+/// `owner_id` was created, changed, moved or deleted.
+pub mod file_change {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "file_changes")]
+    pub struct Model {
+        /// Increasing: the position in the feed (the cursor).
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub owner_id: Uuid,
+        pub node_id: Uuid,
+        /// `created`, `changed`, `moved` or `deleted`.
+        pub kind: String,
+        pub time: DateTimeUtc,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 /// One entry of the activity log: who did what, plus warnings and errors.
 pub mod log_entry {
     use sea_orm::entity::prelude::*;

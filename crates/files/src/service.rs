@@ -10,6 +10,7 @@ use rustcloud_auth::User;
 use rustcloud_core::{audit, validate, BlobStore, ByteRange, ByteStream, Error, ErrorKind, Live, Result};
 use rustcloud_db::node;
 
+use crate::changes::{ChangeKind, Watchers, HINT_BACKLOG};
 use crate::events::{FileEvent, FileEventKind, EVENT_BACKLOG};
 use sea_orm::sea_query::{Expr, Func, LikeExpr};
 use sea_orm::{
@@ -148,6 +149,13 @@ pub struct Files {
     /// Uploads under way, per user: what each user is writing at the moment
     /// counts against the quota of the user's other uploads.
     writing: Arc<Mutex<HashMap<Uuid, Writing>>>,
+    /// Held while an entry of the change feed is written, so entries get
+    /// their ids in the order they are written (see `changes.rs`).
+    pub(crate) noting: tokio::sync::Mutex<()>,
+    /// Ids of users with new entries in the change feed.
+    pub(crate) hints: tokio::sync::broadcast::Sender<Uuid>,
+    /// Connections that wait for hints, per user.
+    pub(crate) watchers: Arc<Watchers>,
 }
 
 /// The uploads of one user under way.
@@ -173,6 +181,9 @@ impl Files {
             events: tokio::sync::broadcast::channel(EVENT_BACKLOG).0,
             moving: tokio::sync::Mutex::new(()),
             writing: Arc::default(),
+            noting: tokio::sync::Mutex::new(()),
+            hints: tokio::sync::broadcast::channel(HINT_BACKLOG).0,
+            watchers: Arc::default(),
         }
     }
 
@@ -244,7 +255,10 @@ impl Files {
 
     /// Creates folder `name` in `parent` (already checked), without an audit event.
     pub(crate) async fn insert_folder(&self, parent: &node::Model, name: &str) -> Result<node::Model> {
-        new_node(parent.owner_id, Some(parent.id), name, true).insert(&self.db).await.map_err(name_taken)
+        let folder =
+            new_node(parent.owner_id, Some(parent.id), name, true).insert(&self.db).await.map_err(name_taken)?;
+        self.note(ChangeKind::Created, &folder).await;
+        Ok(folder)
     }
 
     /// Stores a new file `name` in a folder. An existing file with that name is
@@ -302,6 +316,7 @@ impl Files {
 
         match file.insert(&self.db).await {
             Ok(file) => {
+                self.note(ChangeKind::Created, &file).await;
                 self.fit_quota(user).await;
                 Ok((file.into(), false))
             }
@@ -391,6 +406,11 @@ impl Files {
             _ => updated,
         };
         if updated.name != node.name || updated.parent_id != node.parent_id {
+            self.note_moved(&node, &updated).await;
+        } else if update.modified_at.is_some() {
+            self.note(ChangeKind::Changed, &updated).await;
+        }
+        if updated.name != node.name || updated.parent_id != node.parent_id {
             let mut before = before;
             if let Some(file) = before.iter_mut().find(|file| file.node.id == updated.id) {
                 file.node = updated.clone().into();
@@ -470,6 +490,7 @@ impl Files {
         // Rows of the whole subtree (and shares and versions of it) go with the
         // node thanks to ON DELETE CASCADE.
         node::Entity::delete_by_id(node.id).exec(&self.db).await?;
+        self.note_deleted(node).await;
         for key in blob_keys {
             self.discard_blob(&key).await;
         }
@@ -657,6 +678,10 @@ impl Files {
             }
         };
 
+        // The copy is one change, the top of it: clients list what is inside.
+        if created.is_empty() {
+            self.note(ChangeKind::Created, &copy).await;
+        }
         created.insert(copy.id);
         if source.is_dir {
             for child in self.child_rows(source.id).await? {
@@ -699,6 +724,7 @@ impl Files {
                 return Err(err);
             }
         };
+        self.note(ChangeKind::Changed, &updated).await;
         if let Some(old_key) = &old.content_key {
             // The same bytes again are no new version.
             let changed = old.sha256.as_deref() != Some(stored.sha256.as_str());

@@ -34,6 +34,8 @@ pub enum ErrorKind {
     NotFound,
     /// The request conflicts with the current state, e.g. a duplicate name (409).
     Conflict,
+    /// What the request refers to is gone for good, e.g. an expired cursor (410).
+    Gone,
     /// The upload does not fit into the quota or size limit (413).
     PayloadTooLarge,
     /// The requested byte range is outside of the file (416).
@@ -57,6 +59,7 @@ impl ErrorKind {
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict => StatusCode::CONFLICT,
+            Self::Gone => StatusCode::GONE,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,

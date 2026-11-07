@@ -18,6 +18,7 @@ use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 use uuid::Uuid;
 
+use crate::changes::ChangeKind;
 use crate::events::FileEventKind;
 use crate::service::{Files, Node};
 use crate::settings::FilesSettings;
@@ -60,6 +61,7 @@ impl Files {
         };
         let name = self.free_name(target.id, &node.name, node.is_dir).await?;
         let restored = self.take_out(&node, target.id, &name).await?;
+        self.note(ChangeKind::Created, &restored).await;
         self.emit_for(FileEventKind::Created, restored.id, None).await;
         audit!("file.restore", name = restored.name, folder = restored.is_dir, "restored from the trash");
         Ok(restored.into())
@@ -93,7 +95,8 @@ impl Files {
     }
 
     /// Every hour, removes what has been in the trash longer than
-    /// `[files] trash_days` (none when 0), and versions no longer kept.
+    /// `[files] trash_days` (none when 0), versions no longer kept and old
+    /// entries of the change feed.
     pub fn start_trash_cleanup(self: &Arc<Self>) {
         let files = self.clone();
         tokio::spawn(async move {
@@ -102,6 +105,9 @@ impl Files {
                 every.tick().await;
                 if let Err(err) = files.purge_locks().await {
                     tracing::warn!("locks: {err}");
+                }
+                if let Err(err) = files.purge_changes().await {
+                    tracing::warn!("change feed: {err}");
                 }
                 match files.purge_versions().await {
                     Ok(0) => {}
@@ -143,6 +149,7 @@ impl Files {
                 .await?;
         }
         db.commit().await?;
+        self.note_deleted(node).await;
         Ok(node::Model { trashed_at: Some(now), ..moved })
     }
 
