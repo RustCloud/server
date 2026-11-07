@@ -413,6 +413,9 @@ const en = {
   quotaMib: 'Quota, MiB',
   created: 'Created',
   resetPassword: 'Reset password',
+  deleteAccount: 'Delete',
+  deleteAccountConfirm: (name: string) =>
+    `Delete the account ${name} with all its files? This cannot be undone. Type the username to confirm:`,
   newPasswordFor: (name: string) => `New password for ${name}:`,
   you: 'you',
 
@@ -1052,6 +1055,9 @@ const ru: Texts = {
   quotaMib: 'Квота, МиБ',
   created: 'Создан',
   resetPassword: 'Сбросить пароль',
+  deleteAccount: 'Удалить',
+  deleteAccountConfirm: (name: string) =>
+    `Удалить аккаунт ${name} вместе со всеми файлами? Отменить нельзя. Введите имя пользователя для подтверждения:`,
   newPasswordFor: (name: string) => `Новый пароль для ${name}:`,
   you: 'вы',
 

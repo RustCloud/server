@@ -2769,3 +2769,60 @@ async fn folders_are_downloaded_as_zip_archives() {
     let bob = app.register("bob").await;
     assert_eq!(app.get(&format!("/api/v1/files/{trip}/zip"), As::Browser(&bob)).await.status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn admins_delete_accounts_with_all_their_files() {
+    let app = TestApp::new().await;
+    let admin = app.register("admin").await;
+    let account = json!({ "username": "bob", "password": "password123" });
+    let created = app.json(Method::POST, "/api/v1/admin/users", As::Browser(&admin), account.clone()).await.json();
+    let bob_id = created["id"].as_str().unwrap().to_owned();
+    let login = json!({ "username": "bob", "password": "password123" });
+    let bob = app.json(Method::POST, "/api/v1/auth/login", As::Anonymous, login.clone()).await.session_cookie();
+
+    // Files, the trash and half an upload in parts: all blobs. (Saves this
+    // close together keep no earlier version.)
+    let blobs = || walk_files(&app.dir.path().join("blobs"));
+    let root = app.root_id(&bob).await;
+    app.upload(&bob, &root, "a.txt", "one").await;
+    let uri = format!("/api/v1/files/{root}/upload?name=a.txt&overwrite=true");
+    app.send(Method::POST, &uri, As::Browser(&bob), Body::from("two"), &[]).await;
+    let gone = app.upload(&bob, &root, "b.txt", "trash").await;
+    let uri = format!("/api/v1/files/{}", gone["id"].as_str().unwrap());
+    app.send(Method::DELETE, &uri, As::Browser(&bob), Body::empty(), &[]).await;
+    let uri = format!("/api/v1/files/{root}/uploads");
+    let upload = app.json(Method::POST, &uri, As::Browser(&bob), json!({ "name": "big.bin", "size": 10 })).await.json();
+    let uri = format!("/api/v1/files/uploads/{}?offset=0", upload["id"].as_str().unwrap());
+    let part = app.send(Method::PUT, &uri, As::Browser(&bob), Body::from("12345"), &[]).await;
+    assert_eq!(part.status, StatusCode::OK, "{}", part.text());
+    assert_eq!(blobs(), 3);
+
+    let user_uri = format!("/api/v1/admin/users/{bob_id}");
+    let by_bob = app.send(Method::DELETE, &user_uri, As::Browser(&bob), Body::empty(), &[]).await;
+    assert_eq!(by_bob.status, StatusCode::FORBIDDEN);
+    let me = app.get("/api/v1/auth/me", As::Browser(&admin)).await.json();
+    let self_uri = format!("/api/v1/admin/users/{}", me["id"].as_str().unwrap());
+    let own = app.send(Method::DELETE, &self_uri, As::Browser(&admin), Body::empty(), &[]).await;
+    assert_eq!(own.json()["error"]["code"], "CANNOT_CHANGE_SELF");
+
+    let deleted = app.send(Method::DELETE, &user_uri, As::Browser(&admin), Body::empty(), &[]).await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.text());
+    assert_eq!(blobs(), 0, "nothing of bob's is left in storage");
+    assert_eq!(app.get("/api/v1/files/root", As::Browser(&bob)).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(app.get("/api/v1/admin/users", As::Browser(&admin)).await.json().as_array().unwrap().len(), 1);
+    let again = app.send(Method::DELETE, &user_uri, As::Browser(&admin), Body::empty(), &[]).await;
+    assert_eq!(again.status, StatusCode::NOT_FOUND);
+    // The name is free again, for a new account with nothing of the old one.
+    let created = app.json(Method::POST, "/api/v1/admin/users", As::Browser(&admin), account).await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let bob = app.json(Method::POST, "/api/v1/auth/login", As::Anonymous, login).await.session_cookie();
+    let root = app.root_id(&bob).await;
+    let children = app.get(&format!("/api/v1/files/{root}/children"), As::Browser(&bob)).await.json();
+    assert_eq!(children, json!([]));
+}
+
+/// Files below `dir`, at any depth.
+fn walk_files(dir: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries.flatten().map(|entry| if entry.path().is_dir() { walk_files(&entry.path()) } else { 1 }).sum()
+}

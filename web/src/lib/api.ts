@@ -690,6 +690,7 @@ export const api = {
   createUser: (account: { username: string; password: string; display_name?: string; is_admin: boolean }) =>
     request<User>('POST', '/api/v1/admin/users', account),
   updateUser: (id: string, update: AccountUpdate) => request<User>('PATCH', `/api/v1/admin/users/${id}`, update),
+  deleteUser: (id: string) => request<void>('DELETE', `/api/v1/admin/users/${id}`),
 };
 
 /** A running upload that reports progress and can be cancelled. */

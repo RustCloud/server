@@ -56,6 +56,17 @@
     if (newPassword) update(user, { password: newPassword });
   }
 
+  async function remove(user: User) {
+    if (prompt(t.deleteAccountConfirm(user.username))?.trim().toLowerCase() !== user.username) return;
+    try {
+      await api.deleteUser(user.id);
+      error = '';
+    } catch (e) {
+      error = errorText(e);
+    }
+    await refresh();
+  }
+
   refresh();
 </script>
 
@@ -110,7 +121,12 @@
             />
           </td>
           <td class="muted small">{formatDate(user.created_at, locale)}</td>
-          <td><button type="button" class="small" onclick={() => resetPassword(user)}>{t.resetPassword}</button></td>
+          <td class="actions">
+            <button type="button" class="small" onclick={() => resetPassword(user)}>{t.resetPassword}</button>
+            {#if !isSelf}
+              <button type="button" class="small danger" onclick={() => remove(user)}>{t.deleteAccount}</button>
+            {/if}
+          </td>
         </tr>
       {/each}
     </tbody>
@@ -128,6 +144,11 @@
 <style>
   .table-wrap {
     overflow-x: auto;
+  }
+  .actions {
+    display: flex;
+    gap: 6px;
+    white-space: nowrap;
   }
   table {
     width: 100%;

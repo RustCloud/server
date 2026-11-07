@@ -5,6 +5,7 @@
 //! routers, keeps the settings file, and adds what is common to every
 //! response (security headers, logging, the web UI).
 
+mod accounts;
 mod app_bodies;
 mod app_links;
 mod app_passwords;
@@ -180,6 +181,7 @@ impl AppState {
 pub fn app(state: AppState) -> Router {
     let api = Router::new()
         .merge(rustcloud_auth::router())
+        .merge(accounts::router())
         .merge(oidc::router())
         .merge(oauth::router())
         .merge(rustcloud_files::router())

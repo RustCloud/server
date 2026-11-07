@@ -233,9 +233,15 @@
 | `GET /api/v1/admin/users`            | —                                                            | `[User]`     |
 | `POST /api/v1/admin/users`           | `{username, password, display_name?, email?, is_admin?}`     | `201 User`   |
 | `PATCH /api/v1/admin/users/{id}`     | `{display_name?, is_admin?, disabled?, quota_bytes?, password?}` | `User`   |
+| `DELETE /api/v1/admin/users/{id}`    | —                                                            | `204`        |
 
 - `quota_bytes: null` снимает квоту.
 - `disabled: true` или новый `password` завершают все сессии пользователя.
-- Себя нельзя отключить или лишить прав — `400 CANNOT_CHANGE_SELF`.
+- Себя нельзя отключить, лишить прав или удалить — `400 CANNOT_CHANGE_SELF`.
+- `DELETE` удаляет аккаунт со всем, что к нему относится: файлы, корзину, версии, незаконченные
+  загрузки, публичные ссылки, сессии, пароли приложений, общий доступ, задачи плагинов. Файлы
+  сервер не открывает — удаляет записи и содержимое в хранилище
+  ([server/src/accounts.rs](../../crates/server/src/accounts.rs)). Записи журнала остаются.
+  Имя освобождается: новый аккаунт с ним ничего от старого не получает.
 
 См. также: [Способы входа](../dev/login-providers.md)

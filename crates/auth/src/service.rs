@@ -500,6 +500,19 @@ impl Auth {
         Ok(updated.into())
     }
 
+    /// Deletes another user's account with everything that hangs on it in
+    /// the database (files, sessions, passwords, shares…). Their blobs are
+    /// the caller's: see `Files::account_blobs`.
+    pub async fn delete_account(&self, actor: &User, user_id: Uuid) -> Result<()> {
+        if actor.id == user_id {
+            return Err(Error::bad_request("CANNOT_CHANGE_SELF", "You cannot delete your own account"));
+        }
+        let row = self.find_row(user_id).await?;
+        user::Entity::delete_by_id(user_id).exec(&self.db).await?;
+        audit!("account.delete", account = row.username, "account deleted with its files");
+        Ok(())
+    }
+
     pub(crate) async fn find_row(&self, user_id: Uuid) -> Result<user::Model> {
         user::Entity::find_by_id(user_id)
             .one(&self.db)

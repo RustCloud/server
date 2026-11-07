@@ -48,6 +48,7 @@
 //! an app password for `files`.
 //! | POST   | `/admin/storage/speed-test`| run a storage speed test (admins)          |
 
+mod accounts;
 mod app;
 mod app_files;
 mod app_shares;
@@ -68,6 +69,7 @@ mod trash;
 mod uploads;
 mod versions;
 
+pub use accounts::AccountBlobs;
 pub use app::{manifest, FILES_INTERFACE_VERSION};
 pub use app_shares::{AppShare, AppShares, NewAppShare, Person};
 pub use appdata::APPDATA_FOLDER;
