@@ -51,6 +51,10 @@
             <span>/</span><a href={href(`/s/${token}/${part.id}`)}>{part.name}</a>
           {/each}
           {#if view.current.id !== view.shared.id}<span>/</span><strong>{view.current.name}</strong>{/if}
+          <a class="button small zip" href={api.publicZipUrl(token, view.current.id)} download>
+            <Icon name="download" />
+            {t.downloadZip}
+          </a>
         </nav>
         <FileList nodes={view.children} onopen={open}>
           {#snippet actions(node)}
@@ -58,6 +62,11 @@
               <a class="button small" href={api.publicContentUrl(token, node.id, true)} download>
                 <Icon name="download" />
                 {t.download}
+              </a>
+            {:else}
+              <a class="button small" href={api.publicZipUrl(token, node.id)} download>
+                <Icon name="download" />
+                {t.downloadZip}
               </a>
             {/if}
           {/snippet}
@@ -128,6 +137,9 @@
     gap: 6px;
     align-items: center;
     color: var(--text);
+  }
+  .breadcrumbs .zip {
+    margin-left: auto;
   }
   .file {
     display: grid;

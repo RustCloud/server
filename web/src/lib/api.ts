@@ -608,6 +608,7 @@ export const api = {
   emptyTrash: () => request<void>('DELETE', '/api/v1/files/trash'),
   search: (query: string) => request<FileNode[]>('GET', `/api/v1/files/search?q=${enc(query)}`),
   usage: () => request<Usage>('GET', '/api/v1/usage'),
+  zipUrl: (id: string) => `/api/v1/files/${id}/zip`,
   contentUrl: (id: string, download = false) => `/api/v1/files/${id}/content${download ? '?download=1' : ''}`,
   unlock: (id: string) => request<void>('DELETE', `/api/v1/files/${id}/lock`),
   versions: (id: string) => request<Versions>('GET', `/api/v1/files/${id}/versions`),
@@ -625,6 +626,8 @@ export const api = {
   deleteShare: (id: string) => request<void>('DELETE', `/api/v1/shares/${id}`),
   publicView: (token: string, nodeId?: string) =>
     request<PublicView>('GET', `/api/v1/public/${enc(token)}${nodeId ? `?node=${nodeId}` : ''}`),
+  publicZipUrl: (token: string, nodeId?: string) =>
+    `/api/v1/public/${enc(token)}/zip${nodeId ? `?node=${nodeId}` : ''}`,
   publicContentUrl: (token: string, nodeId?: string, download = false) => {
     const query = new URLSearchParams();
     if (nodeId) query.set('node', nodeId);

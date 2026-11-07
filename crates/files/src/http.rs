@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use uuid::Uuid;
 
+use crate::archive::ZipDownload;
 use crate::changes::{ChangePage, ChangeWatch, HINT_EVERY, WATCH_TIME};
 use crate::content;
 use crate::service::{Files, Node, NodeUpdate, Usage};
@@ -50,6 +51,7 @@ where
         .route("/api/v1/files/uploads/{upload}", get(upload_info).put(upload_part).delete(cancel_upload))
         .route("/api/v1/files/uploads/{upload}/finish", post(finish_upload))
         .route("/api/v1/files/{id}/content", get(download).put(replace_content))
+        .route("/api/v1/files/{id}/zip", get(download_zip))
         .route("/api/v1/files/{id}/copy", post(copy))
         .route("/api/v1/files/{id}/restore", post(restore))
         .route("/api/v1/files/{id}/lock", delete(unlock))
@@ -61,6 +63,7 @@ where
         .route("/api/v1/shares/{id}", delete(delete_share))
         .route("/api/v1/public/{token}", get(public_view))
         .route("/api/v1/public/{token}/content", get(public_download))
+        .route("/api/v1/public/{token}/zip", get(public_zip))
         .route("/api/v1/admin/storage", get(storage))
         .route("/api/v1/admin/storage/speed-test", post(speed_test))
         .merge(crate::dav::router())
@@ -459,6 +462,28 @@ async fn public_download(
     let is_pdf = node.mime_type.as_deref() == Some("application/pdf");
     let attachment = params.download.is_some() || is_pdf;
     content::serve(node, &headers, attachment, |range| files.public_download(&token, params.node, range)).await
+}
+
+async fn download_zip(State(files): State<Arc<Files>>, current: CurrentUser, Path(id): Path<Uuid>) -> Result<Response> {
+    Ok(zip_response(files.download_zip(current.user(), id).await?))
+}
+
+async fn public_zip(
+    State(files): State<Arc<Files>>,
+    Path(token): Path<String>,
+    Query(params): Query<PublicParams>,
+) -> Result<Response> {
+    Ok(zip_response(files.public_zip(&token, params.node).await?))
+}
+
+/// A zip archive as it is written; its size is not known before.
+fn zip_response(zip: ZipDownload) -> Response {
+    let headers = [
+        (header::CONTENT_TYPE, "application/zip".to_owned()),
+        (header::CONTENT_DISPOSITION, content::content_disposition("attachment", &zip.name)),
+        (header::CACHE_CONTROL, "no-store".to_owned()),
+    ];
+    (headers, Body::from_stream(zip.body)).into_response()
 }
 
 /// The request body as a stream of byte chunks.

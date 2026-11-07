@@ -36,5 +36,8 @@
 `GET /api/v1/public/{token}/content[?node=<id>][&download=1]` — скачивание, те же `Range`
 и `ETag`, что у [файлов](files.md#скачивание).
 
+`GET /api/v1/public/{token}/zip[?node=<id>]` — опубликованная папка или папка внутри неё
+[архивом](files.md#папка-архивом).
+
 Истёкшая или удалённая ссылка — `404 SHARE_NOT_FOUND`. Скачивания попадают в
 [журнал](../admin.md#журнал) как `share.download`.

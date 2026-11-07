@@ -21,6 +21,7 @@
 //! | PUT    | `/files/uploads/{u}?offset=` | the next part (raw body)                 |
 //! | POST   | `/files/uploads/{u}/finish`| make the parts the file `{sha256}`         |
 //! | GET    | `/files/{id}/content`      | download (supports `Range`, `If-None-Match`)|
+//! | GET    | `/files/{id}/zip`          | download a folder as a zip archive         |
 //! | PUT    | `/files/{id}/content`      | replace file content (raw body)            |
 //! | PATCH  | `/files/{id}`              | rename / move `{name?, parent_id?}`        |
 //! | POST   | `/files/{id}/copy`         | copy `{parent_id, name?}`                  |
@@ -40,6 +41,7 @@
 //! | DELETE | `/shares/{id}`             | delete a public link                       |
 //! | GET    | `/public/{token}`          | public link: metadata and folder contents  |
 //! | GET    | `/public/{token}/content`  | public link: download                      |
+//! | GET    | `/public/{token}/zip`      | public link: a folder as a zip archive     |
 //! | GET    | `/admin/storage`           | storage size, use and speed (admins)       |
 //!
 //! WebDAV (`/dav/`, the user's root folder) is in the `dav` module: clients log in with
@@ -50,6 +52,7 @@ mod app;
 mod app_files;
 mod app_shares;
 mod appdata;
+mod archive;
 mod changes;
 pub mod content;
 mod dav;
@@ -68,6 +71,7 @@ mod versions;
 pub use app::{manifest, FILES_INTERFACE_VERSION};
 pub use app_shares::{AppShare, AppShares, NewAppShare, Person};
 pub use appdata::APPDATA_FOLDER;
+pub use archive::{ZipDownload, ZIP_MAX_ENTRIES};
 pub use changes::{
     Change, ChangeKind, ChangePage, ChangeWatch, CHANGES_AT_ONCE, HINT_EVERY, KEEP_DAYS, MAX_WATCHERS, WATCH_TIME,
 };

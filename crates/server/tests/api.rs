@@ -2708,3 +2708,64 @@ async fn files_are_reached_over_webdav() {
     let wrong = dav_as(&app, "alice", "wrong", "PROPFIND", "/dav/", "", &[]).await;
     assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn folders_are_downloaded_as_zip_archives() {
+    let app = TestApp::with_config("[accounts]\nopen_registration = true\n").await;
+    let cookie = app.register("alice").await;
+    let root = app.root_id(&cookie).await;
+    let folder = |parent: String, name: &'static str| {
+        let app = &app;
+        let cookie = cookie.clone();
+        async move {
+            let uri = format!("/api/v1/files/{parent}/folders");
+            let reply = app.json(Method::POST, &uri, As::Browser(&cookie), json!({ "name": name })).await;
+            reply.json()["id"].as_str().unwrap().to_owned()
+        }
+    };
+    let trip = folder(root.clone(), "Trip").await;
+    let day = folder(trip.clone(), "Day 1").await;
+    folder(trip.clone(), "Empty").await;
+    app.upload(&cookie, &trip, "notes.txt", "packing list").await;
+    app.upload(&cookie, &day, "photo.jpg", "not really a photo").await;
+    let gone = app.upload(&cookie, &root, "old.txt", "deleted").await;
+    let uri = format!("/api/v1/files/{}", gone["id"].as_str().unwrap());
+    app.send(Method::DELETE, &uri, As::Browser(&cookie), Body::empty(), &[]).await;
+
+    let read = |bytes: &[u8]| {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let mut entries = Vec::new();
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i).unwrap();
+            let mut content = String::new();
+            std::io::Read::read_to_string(&mut file, &mut content).unwrap();
+            entries.push((file.name().unwrap().to_string(), content));
+        }
+        entries
+    };
+    let reply = app.get(&format!("/api/v1/files/{trip}/zip"), As::Browser(&cookie)).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.header(header::CONTENT_TYPE), "application/zip");
+    assert!(reply.header(header::CONTENT_DISPOSITION).contains("Trip.zip"));
+    let entries = read(&reply.body);
+    let expected =
+        [("Day 1/", ""), ("Day 1/photo.jpg", "not really a photo"), ("Empty/", ""), ("notes.txt", "packing list")];
+    let expected: Vec<(String, String)> = expected.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    assert_eq!(entries, expected);
+
+    // Everything, but not the trash.
+    let all = read(&app.get(&format!("/api/v1/files/{root}/zip"), As::Browser(&cookie)).await.body);
+    assert!(all.iter().any(|(name, _)| name == "Trip/Day 1/photo.jpg"));
+    assert!(all.iter().all(|(name, _)| !name.contains("trash") && !name.contains("old.txt")), "{all:?}");
+
+    // Through a public link, a subfolder too; files are not archives.
+    let share = app.json(Method::POST, "/api/v1/shares", As::Browser(&cookie), json!({ "node_id": trip })).await.json();
+    let token = share["token"].as_str().unwrap();
+    let public = app.get(&format!("/api/v1/public/{token}/zip?node={day}"), As::Anonymous).await;
+    assert_eq!(read(&public.body), [("photo.jpg".to_owned(), "not really a photo".to_owned())]);
+    let file = app.upload(&cookie, &trip, "x.txt", "x").await;
+    let uri = format!("/api/v1/files/{}/zip", file["id"].as_str().unwrap());
+    assert_eq!(app.get(&uri, As::Browser(&cookie)).await.json()["error"]["code"], "NOT_A_FOLDER");
+    let bob = app.register("bob").await;
+    assert_eq!(app.get(&format!("/api/v1/files/{trip}/zip"), As::Browser(&bob)).await.status, StatusCode::NOT_FOUND);
+}

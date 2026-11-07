@@ -24,8 +24,10 @@ sea-orm.workspace = true
 serde.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 rustcloud-db = { workspace = true, features = ["testing"] }

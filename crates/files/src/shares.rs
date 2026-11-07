@@ -131,6 +131,12 @@ impl Files {
         Ok(self.node_in_share(&shared, node_id).await?.into())
     }
 
+    /// A file or folder reached through a public link.
+    pub(crate) async fn public_node(&self, token: &str, node_id: Option<Uuid>) -> Result<node::Model> {
+        let (_, shared) = self.open_share(token).await?;
+        self.node_in_share(&shared, node_id).await
+    }
+
     /// Reads a file reachable through a public link.
     pub async fn public_download(
         &self,

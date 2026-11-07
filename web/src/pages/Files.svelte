@@ -459,6 +459,11 @@
                   <Icon name="download" />
                   {t.download}
                 </a>
+              {:else if !inTrash}
+                <a href={api.zipUrl(node.id)} download onclick={closeMenu}>
+                  <Icon name="download" />
+                  {t.downloadZip}
+                </a>
               {/if}
               {#if inTrash}
                 {#if atTrashTop}

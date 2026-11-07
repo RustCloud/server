@@ -153,7 +153,7 @@ fn is_safe_inline(mime: &str) -> bool {
 }
 
 /// `Content-Disposition` with an ASCII fallback name and the exact UTF-8 name (RFC 6266).
-fn content_disposition(kind: &str, name: &str) -> String {
+pub(crate) fn content_disposition(kind: &str, name: &str) -> String {
     let fallback: String = name
         .chars()
         .map(|c| if c == ' ' || (c.is_ascii_graphic() && c != '"' && c != '\\') { c } else { '_' })
