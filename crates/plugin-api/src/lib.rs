@@ -26,7 +26,7 @@ pub use semver::{Version, VersionReq};
 /// Version of this API. Minor versions only add things; a major version may
 /// break apps, which then declare it in [`Manifest::api`]. Before 1.0 a minor
 /// version may break too (the semver rule for `0.x`).
-pub const API_VERSION: &str = "0.2.16";
+pub const API_VERSION: &str = "0.2.17";
 
 /// [`API_VERSION`] parsed.
 pub fn api_version() -> Version {

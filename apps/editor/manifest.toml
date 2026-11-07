@@ -1,0 +1,43 @@
+id = "editor"
+version = "0.1.0"
+# [[open_with]] needs 0.2.14, its `extensions` 0.2.17.
+api = "^0.2.17"
+
+[name]
+en = "Text editor"
+ru = "Текстовый редактор"
+
+# Text files of any folder: the user opens one with "Edit" in the files'
+# menu, and the editor gets that one file while its page is open. So it has
+# no folder of its own and no entry in the side panel (no [ui]).
+[permissions]
+files = "opened"
+files_write = true
+
+[[open_with]]
+mime = [
+  "text/*",
+  "application/json",
+  "application/xml",
+  "application/javascript",
+  "application/x-javascript",
+  "application/x-sh",
+  "application/toml",
+  "application/yaml",
+  "application/x-yaml",
+  "application/sql",
+  "application/x-httpd-php",
+]
+# Files whose type says nothing (.env, Dockerfile) or the wrong thing (.ts).
+extensions = [
+  "txt", "md", "markdown", "log", "csv", "tsv", "json", "jsonl", "xml", "yml", "yaml", "toml",
+  "ini", "cfg", "conf", "env", "properties", "sh", "bash", "zsh", "fish", "ps1", "bat",
+  "rs", "go", "py", "rb", "php", "java", "kt", "kts", "scala", "swift", "c", "h", "cc", "cpp", "hpp", "cs",
+  "js", "mjs", "cjs", "ts", "tsx", "jsx", "vue", "svelte", "css", "scss", "less", "html", "htm",
+  "sql", "graphql", "proto", "lua", "pl", "r", "dart", "ex", "exs", "erl", "hs", "ml", "clj", "nix", "tf",
+  "dockerfile", "makefile", "gitignore", "editorconfig", "gitattributes", "service", "desktop",
+]
+page = "/edit"
+write = true
+layout = "full"
+label = { en = "Edit as text", ru = "Редактировать как текст" }

@@ -56,12 +56,20 @@ export function mimeMatches(patterns: string[], mime: string | null): boolean {
   );
 }
 
+/** Whether a file's name has one of `extensions` (`env`), or is one (`dockerfile`). */
+export function extensionMatches(extensions: string[] | undefined, name: string): boolean {
+  if (!extensions?.length) return false;
+  const lower = name.toLowerCase();
+  const extension = lower.includes('.') ? lower.slice(lower.lastIndexOf('.') + 1) : lower;
+  return extensions.includes(extension);
+}
+
 /** The apps that open `node`, by their `[[open_with]]` entries, in the order of the apps. */
 export function openersFor(apps: AppManifest[], node: FileNode, locale: string): Opener[] {
   if (node.is_dir) return [];
   return apps.flatMap((app) =>
     (app.open_with ?? [])
-      .filter((open) => mimeMatches(open.mime, node.mime_type))
+      .filter((open) => mimeMatches(open.mime, node.mime_type) || extensionMatches(open.extensions, node.name))
       .map((open) => ({
         appId: app.id,
         label: open.label?.[locale] ?? open.label?.en ?? null,

@@ -241,6 +241,8 @@ export interface SystemInfo {
 export interface OpenWith {
   /** `text/markdown`, `image/*`. */
   mime: string[];
+  /** `env`, `ini`; whole names of files without one: `dockerfile`. */
+  extensions?: string[];
   /** The app's page; the panel adds `?file=<id>`. */
   page: string;
   write?: boolean;

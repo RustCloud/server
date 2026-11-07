@@ -13,7 +13,7 @@
 
 Версия API — `0.2.16` ([plugin-api/src/lib.rs](../../crates/plugin-api/src/lib.rs)). До 1.0 минорная
 версия может ломать: в 0.2.0 у записей AppData появились `etag` и `updated-at`, `write` возвращает запись.
-Патч-версии только добавляют: 0.2.1 — импорт `shares`, 0.2.2 — `settings`, 0.2.3 — `http`, 0.2.4 — `storage`, 0.2.5 — `jobs` и мир `app-with-jobs`, 0.2.6 — `on` и `mime` у `[[jobs]]`, 0.2.7 — `use-ffmpeg`, 0.2.8 — события `file.deleted` и `file.moved`, 0.2.9 — `[limits]` в манифесте и импорт `limits`, 0.2.10 — `read-range`, `links` и ответ файлом (`x-rustcloud-send`), 0.2.11 — `links.video-stream`, 0.2.12 — `links.upload`, 0.2.13 — `use-onnx`, 0.2.14 — `[[open_with]]` в манифесте, полный экран и `close` на странице, `write-if-match`, `write-request-body` и `large_bodies`, блокировки, версии, `links.replace`, `tokens`, адреса из настроек и `permissions.frame`, 0.2.15 — `[[proxy]]` в манифесте и импорт `proxy`, 0.2.16 — `[[new_files]]` и `status` в манифесте; плагины, собранные под
+Патч-версии только добавляют: 0.2.1 — импорт `shares`, 0.2.2 — `settings`, 0.2.3 — `http`, 0.2.4 — `storage`, 0.2.5 — `jobs` и мир `app-with-jobs`, 0.2.6 — `on` и `mime` у `[[jobs]]`, 0.2.7 — `use-ffmpeg`, 0.2.8 — события `file.deleted` и `file.moved`, 0.2.9 — `[limits]` в манифесте и импорт `limits`, 0.2.10 — `read-range`, `links` и ответ файлом (`x-rustcloud-send`), 0.2.11 — `links.video-stream`, 0.2.12 — `links.upload`, 0.2.13 — `use-onnx`, 0.2.14 — `[[open_with]]` в манифесте, полный экран и `close` на странице, `write-if-match`, `write-request-body` и `large_bodies`, блокировки, версии, `links.replace`, `tokens`, адреса из настроек и `permissions.frame`, 0.2.15 — `[[proxy]]` в манифесте и импорт `proxy`, 0.2.16 — `[[new_files]]` и `status` в манифесте, 0.2.17 — `extensions` у `[[open_with]]`; плагины, собранные под
 0.2.0, работают без пересборки.
 
 ## Контракт
@@ -468,6 +468,7 @@ paths = ["/browser", "/cool"]                # пути в корне адрес
 ```toml
 [[open_with]]
 mime = ["application/vnd.oasis.opendocument.text", "text/*"]
+extensions = ["env", "ini", "dockerfile"]   # с 0.2.17: по имени, каким бы ни был тип
 page = "/edit"        # панель откроет #/app/<id>/edit?file=<id>
 write = true          # менять файл (нужен permissions.files_write)
 layout = "full"       # на всё окно (по умолчанию) или "panel"
@@ -475,6 +476,10 @@ label = { en = "Edit", ru = "Редактировать" }   # без него �
 ```
 
 - Нужен `permissions.files` не ниже `opened`.
+- `extensions` (с 0.2.17) — расширения без точки, строчными (`env`, `ts`), или целые имена файлов без
+  расширения (`dockerfile`, `makefile`): для файлов, тип которых ничего не говорит
+  (`application/octet-stream` у `.env`) или говорит не то (`video/mp2t` у `.ts`). Файл подходит,
+  если подходит тип или расширение; нужно хотя бы одно из двух.
 - Выбор пользователя в меню — согласие: панель выдаёт плагину [доступ](../api/grants.md) `session`
   к этому одному файлу, подтверждает его каждые 30 секунд и отзывает, когда страницу закрыли.
 - По прямой ссылке (`#/app/<id>/edit?file=<id>`, перезагрузка страницы) панель сначала спрашивает

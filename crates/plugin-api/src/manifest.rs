@@ -148,6 +148,7 @@ pub struct JobKind {
 /// ```toml
 /// [[open_with]]
 /// mime = ["text/markdown", "text/plain"]
+/// extensions = ["env", "ini", "dockerfile"]   # since 0.2.17, whatever the type
 /// page = "/edit"      # the panel opens /app/<id>/edit?file=<id>
 /// write = true        # changes the file too (needs files_write)
 /// layout = "full"     # the whole browser window (default) or "panel"
@@ -157,7 +158,13 @@ pub struct JobKind {
 #[serde(deny_unknown_fields)]
 pub struct OpenWith {
     /// Types like `text/markdown` or `image/*`.
+    #[serde(default)]
     pub mime: Vec<String>,
+    /// File name extensions, lower-case without the dot (`env`, `ini`), or
+    /// whole names of files without one (`dockerfile`): for files whose type
+    /// says nothing (`application/octet-stream`) or the wrong thing (`.ts`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
     /// The app's page that shows the file, starting with `/`; the panel adds
     /// `?file=<id>`.
     pub page: String,
@@ -590,8 +597,10 @@ impl Manifest {
             }
         }
         for (i, open) in self.open_with.iter().enumerate() {
-            let problem = if open.mime.is_empty() || !valid_mime(&open.mime) {
-                Some("needs mime types like text/markdown or image/*")
+            let problem = if (open.mime.is_empty() && open.extensions.is_empty()) || !valid_mime(&open.mime) {
+                Some("needs mime types like text/markdown or image/*, or extensions")
+            } else if !open.extensions.iter().all(|extension| valid_open_extension(extension)) {
+                Some("extensions are lower-case letters, digits, \"-\" and \"_\", without the dot")
             } else if !open.page.starts_with('/') {
                 Some("page must start with \"/\"")
             } else if self.permissions.files < FileScope::Opened {
@@ -696,6 +705,11 @@ impl Manifest {
 }
 
 /// Whether all are types like `image/jpeg` or `image/*`, in lower case.
+fn valid_open_extension(extension: &str) -> bool {
+    (1..=32).contains(&extension.len())
+        && extension.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
 fn valid_mime(types: &[String]) -> bool {
     types.iter().all(|m| m.split('/').count() == 2 && !m.chars().any(char::is_uppercase))
 }
@@ -859,11 +873,15 @@ mod tests {
         assert_eq!((open.page.as_str(), open.write, open.layout), ("/edit", true, Layout::Full));
         let panel = Manifest::from_toml(&with("mime = [\"image/*\"]\npage = \"/view\"\nlayout = \"panel\"")).unwrap();
         assert_eq!(panel.open_with[0].layout, Layout::Panel);
+        let by_name = Manifest::from_toml(&with("extensions = [\"env\", \"dockerfile\"]\npage = \"/edit\"")).unwrap();
+        assert_eq!(by_name.open_with[0].extensions, ["env", "dockerfile"]);
 
         for (entry, reason) in [
             ("mime = []\npage = \"/edit\"", "needs mime types"),
             ("mime = [\"Text/Plain\"]\npage = \"/edit\"", "needs mime types"),
             ("mime = [\"text/plain\"]\npage = \"edit\"", "must start with"),
+            ("extensions = [\".env\"]\npage = \"/edit\"", "without the dot"),
+            ("extensions = [\"ENV\"]\npage = \"/edit\"", "without the dot"),
         ] {
             let err = Manifest::from_toml(&with(entry)).expect_err("rejected");
             assert!(err.0.contains(reason), "{err} should mention {reason}");

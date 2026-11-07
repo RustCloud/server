@@ -3048,3 +3048,51 @@ async fn folders_are_shared_with_users_and_groups() {
     );
     let _ = bob_id;
 }
+
+#[tokio::test]
+async fn the_text_editor_edits_text_files_it_was_opened_with() {
+    let app = TestApp::with_wasm_apps(|apps| install_shipped(apps, "editor")).await;
+    let alice = app.register("alice").await;
+    let root = app.root_id(&alice).await;
+    let file = app.upload(&alice, &root, "notes.env", "A=1\r\nB=2\r\n").await;
+    let file_id = file["id"].as_str().unwrap().to_owned();
+    let api = format!("/app/editor/api/file?id={file_id}");
+
+    // Its manifest offers it for text by type and by extension; no side panel entry.
+    let apps = app.get("/api/v1/apps", As::Browser(&alice)).await.json();
+    let editor = apps["apps"].as_array().unwrap().iter().find(|a| a["id"] == "editor").unwrap().clone();
+    assert!(editor["ui"].is_null(), "{editor}");
+    assert!(editor["open_with"][0]["extensions"].as_array().unwrap().iter().any(|e| e == "env"));
+    let page = app.get("/app/editor/edit", As::Browser(&alice)).await;
+    assert!(page.text().contains("highlight.js"));
+
+    // Only the file the user opened with it.
+    assert_eq!(app.get(&api, As::Browser(&alice)).await.status, StatusCode::NOT_FOUND);
+    let grant = json!({ "app_id": "editor", "node_id": file_id, "write": true, "kind": "session" });
+    let granted = app.json(Method::POST, "/api/v1/grants", As::Browser(&alice), grant).await;
+    assert_eq!(granted.status, StatusCode::CREATED, "{}", granted.text());
+    let opened = app.get(&api, As::Browser(&alice)).await.json();
+    assert_eq!((opened["name"].as_str(), opened["content"].as_str()), (Some("notes.env"), Some("A=1\r\nB=2\r\n")));
+    let etag = opened["etag"].as_str().unwrap().to_owned();
+
+    let save = |content: &str, etag: &str| json!({ "content": content, "etag": etag });
+    let saved = app.json(Method::PUT, &api, As::Browser(&alice), save("A=3\r\n", &etag)).await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.text());
+    let content = format!("/api/v1/files/{file_id}/content");
+    assert_eq!(app.get(&content, As::Browser(&alice)).await.text(), "A=3\r\n");
+    let stale = app.json(Method::PUT, &api, As::Browser(&alice), save("lost", &etag)).await;
+    assert_eq!(stale.status, StatusCode::CONFLICT, "saved over someone else's version");
+
+    // Not text: never opened, so never saved back broken.
+    let binary = format!("/api/v1/files/{root}/upload?name=blob.txt");
+    let blob = app.send(Method::POST, &binary, As::Browser(&alice), Body::from(vec![0xff, 0xfe, 0x00]), &[]).await;
+    let blob_id = blob.json()["id"].as_str().unwrap().to_owned();
+    let grant = json!({ "app_id": "editor", "node_id": blob_id, "write": true, "kind": "session" });
+    app.json(Method::POST, "/api/v1/grants", As::Browser(&alice), grant).await;
+    let refused = app.get(&format!("/app/editor/api/file?id={blob_id}"), As::Browser(&alice)).await;
+    assert_eq!(refused.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let preview =
+        app.send(Method::POST, "/app/editor/api/preview", As::Browser(&alice), Body::from("# Hi <script>"), &[]).await;
+    assert!(preview.text().contains("<h1>Hi &lt;script&gt;</h1>"), "{}", preview.text());
+}

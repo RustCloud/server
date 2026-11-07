@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AppManifest, FileNode } from './api';
-import { isActive, mimeMatches, openerPath, openersFor, serviceOrigin, sidebarEntries } from './apps';
+import { extensionMatches, isActive, mimeMatches, openerPath, openersFor, serviceOrigin, sidebarEntries } from './apps';
 
 const files: AppManifest = {
   id: 'files',
@@ -52,6 +52,16 @@ describe('openersFor', () => {
       { mime: ['image/*'], page: '/view', layout: 'panel', label: { en: 'View', ru: 'Посмотреть' } },
     ],
   };
+
+  it('matches extensions and whole names whatever the type', () => {
+    expect(extensionMatches(['env', 'dockerfile'], '.env')).toBe(true);
+    expect(extensionMatches(['env', 'dockerfile'], 'prod.ENV')).toBe(true);
+    expect(extensionMatches(['env', 'dockerfile'], 'Dockerfile')).toBe(true);
+    expect(extensionMatches(['env'], 'environment.txt')).toBe(false);
+    expect(extensionMatches(undefined, 'a.env')).toBe(false);
+    const editor: AppManifest = { ...files, id: 'editor', open_with: [{ mime: [], extensions: ['ts'], page: '/edit' }] };
+    expect(openersFor([editor], file('app.ts', 'video/mp2t'), 'en')[0].appId).toBe('editor');
+  });
 
   it('matches exact types and wildcards, nothing for folders', () => {
     expect(mimeMatches(['image/*'], 'image/png')).toBe(true);
