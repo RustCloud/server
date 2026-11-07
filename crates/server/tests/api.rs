@@ -2826,3 +2826,76 @@ fn walk_files(dir: &std::path::Path) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
     entries.flatten().map(|entry| if entry.path().is_dir() { walk_files(&entry.path()) } else { 1 }).sum()
 }
+
+#[tokio::test]
+async fn public_links_may_have_a_password_and_take_uploads() {
+    let app = TestApp::new().await;
+    let cookie = app.register("alice").await;
+    let root = app.root_id(&cookie).await;
+    let uri = format!("/api/v1/files/{root}/folders");
+    let inbox = app.json(Method::POST, &uri, As::Browser(&cookie), json!({ "name": "Inbox" })).await.json();
+    let inbox = inbox["id"].as_str().unwrap().to_owned();
+    let file = app.upload(&cookie, &inbox, "rules.txt", "be nice").await;
+    let file_id = file["id"].as_str().unwrap();
+
+    let options = json!({ "node_id": inbox, "password": "open sesame", "allow_upload": true });
+    let share = app.json(Method::POST, "/api/v1/shares", As::Browser(&cookie), options).await.json();
+    assert_eq!((share["has_password"].as_bool(), share["allow_upload"].as_bool()), (Some(true), Some(true)));
+    let token = share["token"].as_str().unwrap().to_owned();
+    let weak = json!({ "node_id": inbox, "password": "123" });
+    assert_eq!(
+        app.json(Method::POST, "/api/v1/shares", As::Browser(&cookie), weak).await.json()["error"]["code"],
+        "WEAK_LINK_PASSWORD"
+    );
+    let file_upload = json!({ "node_id": file_id, "allow_upload": true });
+    let refused = app.json(Method::POST, "/api/v1/shares", As::Browser(&cookie), file_upload).await;
+    assert_eq!(refused.json()["error"]["code"], "NOT_A_FOLDER");
+
+    // Without the password: nothing, not even the file.
+    let view = format!("/api/v1/public/{token}");
+    assert_eq!(app.get(&view, As::Anonymous).await.json()["error"]["code"], "PASSWORD_REQUIRED");
+    let content = format!("/api/v1/public/{token}/content?node={file_id}");
+    assert_eq!(app.get(&content, As::Anonymous).await.status, StatusCode::FORBIDDEN);
+    let unlock = format!("/api/v1/public/{token}/unlock");
+    let wrong = app.json(Method::POST, &unlock, As::Anonymous, json!({ "password": "guess" })).await;
+    assert_eq!(wrong.json()["error"]["code"], "WRONG_LINK_PASSWORD");
+
+    let right = app.json(Method::POST, &unlock, As::Anonymous, json!({ "password": "open sesame" })).await;
+    assert_eq!(right.status, StatusCode::NO_CONTENT);
+    let set_cookie = right.header(header::SET_COOKIE).to_owned();
+    assert!(
+        set_cookie.contains(&format!("Path=/api/v1/public/{token}")) && set_cookie.contains("HttpOnly"),
+        "{set_cookie}"
+    );
+    let key = set_cookie.split(';').next().unwrap().to_owned();
+    let with_key = [(header::COOKIE, key.as_str())];
+    let opened = app.send(Method::GET, &view, As::Anonymous, Body::empty(), &with_key).await.json();
+    assert_eq!(opened["children"][0]["name"], "rules.txt");
+    assert_eq!(opened["can_upload"], true);
+    assert_eq!(app.send(Method::GET, &content, As::Anonymous, Body::empty(), &with_key).await.text(), "be nice");
+
+    // Visitors upload; a taken name gets a number, nothing is overwritten.
+    let upload = format!("/api/v1/public/{token}/upload?name=rules.txt");
+    let uploaded = app.send(Method::POST, &upload, As::Anonymous, Body::from("mine"), &with_key).await;
+    assert_eq!(uploaded.status, StatusCode::CREATED, "{}", uploaded.text());
+    assert_eq!(uploaded.json()["name"], "rules (2).txt");
+    let locked = app.send(Method::POST, &upload, As::Anonymous, Body::from("x"), &[]).await;
+    assert_eq!(locked.json()["error"]["code"], "PASSWORD_REQUIRED");
+    let children = app.get(&format!("/api/v1/files/{inbox}/children"), As::Browser(&cookie)).await.json();
+    assert_eq!(children.as_array().unwrap().len(), 2);
+
+    // A new password shuts out those who had the old one; uploads can be turned off.
+    let share_uri = format!("/api/v1/shares/{}", share["id"].as_str().unwrap());
+    let changed = app
+        .json(Method::PATCH, &share_uri, As::Browser(&cookie), json!({ "password": "new one", "allow_upload": false }))
+        .await;
+    assert_eq!(changed.json()["allow_upload"], false);
+    let shut = app.send(Method::GET, &view, As::Anonymous, Body::empty(), &with_key).await;
+    assert_eq!(shut.json()["error"]["code"], "PASSWORD_REQUIRED");
+    let open = app.json(Method::PATCH, &share_uri, As::Browser(&cookie), json!({ "password": "" })).await.json();
+    assert_eq!(open["has_password"], false);
+    let view_now = app.get(&view, As::Anonymous).await.json();
+    assert_eq!(view_now["can_upload"], false);
+    let no_upload = app.send(Method::POST, &upload, As::Anonymous, Body::from("x"), &[]).await;
+    assert_eq!(no_upload.json()["error"]["code"], "UPLOAD_NOT_ALLOWED");
+}

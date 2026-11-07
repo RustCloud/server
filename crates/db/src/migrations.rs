@@ -28,6 +28,7 @@ impl MigratorTrait for Migrator {
             Box::new(FileChanges),
             Box::new(UploadSessions),
             Box::new(UnmatchedAppShares),
+            Box::new(ShareOptions),
         ]
     }
 }
@@ -702,6 +703,25 @@ impl MigrationTrait for UnmatchedAppShares {
             )
             .await?;
         create_index(manager, "app_shares_unmatched", &["owner_id", "app_id", "path", "username"], true).await
+    }
+}
+
+/// Public links get a password (`shares.password_hash`) and may let
+/// visitors upload into the folder (`shares.allow_upload`).
+struct ShareOptions;
+
+impl MigrationName for ShareOptions {
+    fn name(&self) -> &str {
+        "m0019_share_options"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ShareOptions {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager.alter_table(Table::alter().table("shares").add_column(string_null("password_hash")).to_owned()).await?;
+        let allow_upload = boolean("allow_upload").default(false).to_owned();
+        manager.alter_table(Table::alter().table("shares").add_column(allow_upload).to_owned()).await
     }
 }
 

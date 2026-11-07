@@ -39,6 +39,16 @@ export interface Share {
   expires_at: string | null;
   created_at: string;
   node: FileNode;
+  has_password: boolean;
+  allow_upload: boolean;
+}
+
+/** Options of a public link; a missing field stays as it is. */
+export interface ShareOptions {
+  expires_at?: string | null;
+  /** Empty: no password. */
+  password?: string;
+  allow_upload?: boolean;
 }
 
 export interface PublicView {
@@ -47,6 +57,7 @@ export interface PublicView {
   current: FileNode;
   path: FileNode[];
   children: FileNode[];
+  can_upload: boolean;
 }
 
 export interface AuthStatus {
@@ -621,8 +632,16 @@ export const api = {
 
   // Public links
   shares: () => request<Share[]>('GET', '/api/v1/shares'),
-  createShare: (node_id: string, expires_at: string | null) =>
-    request<Share>('POST', '/api/v1/shares', { node_id, expires_at }),
+  createShare: (node_id: string, options: ShareOptions) =>
+    request<Share>('POST', '/api/v1/shares', { node_id, ...options }),
+  updateShare: (id: string, options: ShareOptions) => request<Share>('PATCH', `/api/v1/shares/${id}`, options),
+  unlockShare: (token: string, password: string) =>
+    request<void>('POST', `/api/v1/public/${enc(token)}/unlock`, { password }),
+  publicUpload: (token: string, nodeId: string | undefined, file: File) => {
+    const query = new URLSearchParams({ name: file.name });
+    if (nodeId) query.set('node', nodeId);
+    return request<FileNode>('POST', `/api/v1/public/${enc(token)}/upload?${query}`, file);
+  },
   deleteShare: (id: string) => request<void>('DELETE', `/api/v1/shares/${id}`),
   publicView: (token: string, nodeId?: string) =>
     request<PublicView>('GET', `/api/v1/public/${enc(token)}${nodeId ? `?node=${nodeId}` : ''}`),

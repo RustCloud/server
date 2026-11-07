@@ -1,8 +1,8 @@
 <!-- What a visitor of a public link sees: a file to download, or a folder to browse. -->
 <script lang="ts">
-  import { api, type FileNode, type PublicView } from '../lib/api';
+  import { api, ApiError, type FileNode, type PublicView } from '../lib/api';
   import { formatBytes, formatDate } from '../lib/format';
-  import { locale, t } from '../lib/i18n';
+  import { errorText, locale, t } from '../lib/i18n';
   import { go, href } from '../lib/router.svelte';
   import FileList from '../components/FileList.svelte';
   import Icon from '../components/Icon.svelte';
@@ -15,17 +15,52 @@
 
   let view = $state<PublicView | null>(null);
   let gone = $state(false);
+  let locked = $state(false);
+  let password = $state('');
+  let error = $state('');
+  let uploaded = $state(0);
   let previewing = $state<FileNode | null>(null);
 
+  async function load() {
+    try {
+      view = await api.publicView(token, nodeId);
+      gone = locked = false;
+    } catch (e) {
+      locked = e instanceof ApiError && e.code === 'PASSWORD_REQUIRED';
+      gone = !locked;
+    }
+  }
+
   $effect(() => {
-    api
-      .publicView(token, nodeId)
-      .then((v) => {
-        view = v;
-        gone = false;
-      })
-      .catch(() => (gone = true));
+    load();
   });
+
+  async function unlock(event: SubmitEvent) {
+    event.preventDefault();
+    try {
+      await api.unlockShare(token, password);
+      password = error = '';
+      await load();
+    } catch (e) {
+      error = errorText(e);
+    }
+  }
+
+  async function upload(event: Event & { currentTarget: HTMLInputElement }) {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = '';
+    error = '';
+    for (const file of files) {
+      try {
+        await api.publicUpload(token, view?.current.id, file);
+        uploaded += 1;
+      } catch (e) {
+        error = `${file.name}: ${errorText(e)}`;
+        break;
+      }
+    }
+    await load();
+  }
 
   function open(node: FileNode) {
     if (node.is_dir) go(`/s/${token}/${node.id}`);
@@ -43,6 +78,17 @@
   <main>
     {#if gone}
       <p class="card">{t.linkGone}</p>
+    {:else if locked}
+      <form class="card unlock" onsubmit={unlock}>
+        <p>{t.linkLocked}</p>
+        <label>
+          {t.password}
+          <!-- svelte-ignore a11y_autofocus -->
+          <input type="password" autocomplete="current-password" bind:value={password} required autofocus />
+        </label>
+        <button type="submit" class="primary">{t.linkUnlock}</button>
+        {#if error}<p class="error">{error}</p>{/if}
+      </form>
     {:else if view}
       {#if view.current.is_dir}
         <nav class="breadcrumbs">
@@ -51,11 +97,20 @@
             <span>/</span><a href={href(`/s/${token}/${part.id}`)}>{part.name}</a>
           {/each}
           {#if view.current.id !== view.shared.id}<span>/</span><strong>{view.current.name}</strong>{/if}
+          {#if view.can_upload}
+            <label class="button small upload">
+              <Icon name="upload" />
+              {t.uploadHere}
+              <input type="file" multiple onchange={upload} />
+            </label>
+          {/if}
           <a class="button small zip" href={api.publicZipUrl(token, view.current.id)} download>
             <Icon name="download" />
             {t.downloadZip}
           </a>
         </nav>
+        {#if error}<p class="error">{error}</p>{/if}
+        {#if uploaded}<p class="muted small">{t.uploadedCount(uploaded)}</p>{/if}
         <FileList nodes={view.children} onopen={open}>
           {#snippet actions(node)}
             {#if !node.is_dir}
@@ -138,8 +193,24 @@
     align-items: center;
     color: var(--text);
   }
+  .breadcrumbs .upload {
+    margin-left: auto;
+    cursor: pointer;
+  }
+  .breadcrumbs .upload input {
+    display: none;
+  }
+  .breadcrumbs .upload + .zip {
+    margin-left: 0;
+  }
   .breadcrumbs .zip {
     margin-left: auto;
+  }
+  .unlock {
+    display: grid;
+    gap: 10px;
+    justify-items: start;
+    max-width: 360px;
   }
   .file {
     display: grid;

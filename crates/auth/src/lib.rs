@@ -40,6 +40,6 @@ pub use http::{
 };
 pub use limiter::AttemptLimiter;
 pub use provider::{CredentialProvider, Identity, PasswordProvider};
-pub use secret::{hmac_sha256, same};
+pub use secret::{hash_password, hmac_sha256, same, verify_password};
 pub use service::{AccountUpdate, Auth, AuthStatus, NewAccount, NewSession, ProfileUpdate, SessionUser, User};
 pub use settings::AccountSettings;

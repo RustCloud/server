@@ -11,6 +11,7 @@ use rustcloud_db::testing::{test_db, TestDb};
 use rustcloud_db::{file_change, file_version, node, share, upload_session};
 use rustcloud_files::{
     ChangeKind, Download, FileEventKind, Files, FilesSettings, GrantKind, Locking, NewGrant, NewUpload, NodeUpdate,
+    ShareOptions,
 };
 use rustcloud_plugin_api::{FileScope, Permissions};
 use rustcloud_storage_local::LocalBlobStore;
@@ -221,7 +222,7 @@ async fn root_cannot_be_renamed_deleted_or_shared() {
     let rename = NodeUpdate { name: Some("x".into()), parent_id: None, ..Default::default() };
     assert_eq!(s.files.update(&s.alice, root.id, rename).await.unwrap_err().code, "ROOT_FOLDER");
     assert_eq!(s.files.delete(&s.alice, root.id).await.unwrap_err().code, "ROOT_FOLDER");
-    assert_eq!(s.files.create_share(&s.alice, root.id, None).await.unwrap_err().code, "ROOT_FOLDER");
+    assert_eq!(s.files.create_share(&s.alice, root.id, ShareOptions::default()).await.unwrap_err().code, "ROOT_FOLDER");
 }
 
 #[tokio::test]
@@ -270,11 +271,11 @@ async fn the_trash_keeps_what_was_deleted_until_restored_or_deleted_again() {
     let root = s.files.root(&s.alice).await.unwrap();
     let docs = s.files.create_folder(&s.alice, root.id, "Docs").await.unwrap();
     let report = s.files.upload(&s.alice, docs.id, "report.pdf", body("1"), false, None).await.unwrap();
-    let share = s.files.create_share(&s.alice, report.id, None).await.unwrap();
+    let share = s.files.create_share(&s.alice, report.id, ShareOptions::default()).await.unwrap();
 
     s.files.delete(&s.alice, report.id).await.unwrap();
     assert!(s.files.search(&s.alice, "report").await.unwrap().is_empty(), "search leaves the trash out");
-    assert!(s.files.public_view(&share.token, None).await.is_err(), "links stop working");
+    assert!(s.files.public_view(&share.token, None, None).await.is_err(), "links stop working");
     // Another file of the same name deleted: both stay.
     let again = s.files.upload(&s.alice, docs.id, "report.pdf", body("2"), false, None).await.unwrap();
     s.files.delete(&s.alice, again.id).await.unwrap();
@@ -298,7 +299,7 @@ async fn the_trash_keeps_what_was_deleted_until_restored_or_deleted_again() {
     let restored = s.files.restore(&s.alice, report.id).await.unwrap();
     assert_eq!((restored.parent_id, restored.name.as_str()), (Some(docs.id), "report.pdf"));
     assert!(restored.trashed_at.is_none());
-    assert!(s.files.public_view(&share.token, None).await.is_ok(), "and its links work again");
+    assert!(s.files.public_view(&share.token, None, None).await.is_ok(), "and its links work again");
     s.files.delete(&s.alice, report.id).await.unwrap();
     s.files.upload(&s.alice, docs.id, "report.pdf", body("3"), false, None).await.unwrap();
     assert_eq!(s.files.restore(&s.alice, report.id).await.unwrap().name, "report (2).pdf");
@@ -394,22 +395,22 @@ async fn public_link_gives_read_access_to_a_folder_and_nothing_else() {
     let inside = s.files.upload(&s.alice, sub.id, "in.txt", body("inside"), false, None).await.unwrap();
     let outside = s.files.upload(&s.alice, root.id, "out.txt", body("outside"), false, None).await.unwrap();
 
-    let link = s.files.create_share(&s.alice, shared.id, None).await.unwrap();
+    let link = s.files.create_share(&s.alice, shared.id, ShareOptions::default()).await.unwrap();
     assert_eq!(s.files.shares(&s.alice).await.unwrap()[0].node.id, shared.id);
 
-    let top = s.files.public_view(&link.token, None).await.unwrap();
+    let top = s.files.public_view(&link.token, None, None).await.unwrap();
     assert_eq!(top.current.id, shared.id);
     assert_eq!(top.children[0].id, sub.id);
 
-    let deeper = s.files.public_view(&link.token, Some(sub.id)).await.unwrap();
+    let deeper = s.files.public_view(&link.token, None, Some(sub.id)).await.unwrap();
     assert_eq!(deeper.path.iter().map(|n| n.id).collect::<Vec<_>>(), [shared.id]);
-    assert_eq!(read(s.files.public_download(&link.token, Some(inside.id), None).await.unwrap()).await, "inside");
+    assert_eq!(read(s.files.public_download(&link.token, None, Some(inside.id), None).await.unwrap()).await, "inside");
 
-    assert!(s.files.public_download(&link.token, Some(outside.id), None).await.is_err());
-    assert!(s.files.public_view(&link.token, Some(root.id)).await.is_err());
+    assert!(s.files.public_download(&link.token, None, Some(outside.id), None).await.is_err());
+    assert!(s.files.public_view(&link.token, None, Some(root.id)).await.is_err());
 
     s.files.delete_share(&s.alice, link.id).await.unwrap();
-    assert_eq!(s.files.public_view(&link.token, None).await.unwrap_err().code, "SHARE_NOT_FOUND");
+    assert_eq!(s.files.public_view(&link.token, None, None).await.unwrap_err().code, "SHARE_NOT_FOUND");
 }
 
 #[tokio::test]
@@ -417,14 +418,14 @@ async fn links_of_a_disabled_account_stop_working() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
     let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false, None).await.unwrap();
-    let link = s.files.create_share(&s.alice, file.id, None).await.unwrap();
-    assert!(s.files.public_view(&link.token, None).await.is_ok());
+    let link = s.files.create_share(&s.alice, file.id, ShareOptions::default()).await.unwrap();
+    assert!(s.files.public_view(&link.token, None, None).await.is_ok());
 
     let mut alice: rustcloud_db::user::ActiveModel =
         rustcloud_db::user::Entity::find_by_id(s.alice.id).one(&s.db.conn).await.unwrap().unwrap().into();
     alice.disabled = Set(true);
     alice.update(&s.db.conn).await.unwrap();
-    assert_eq!(s.files.public_view(&link.token, None).await.unwrap_err().code, "SHARE_NOT_FOUND");
+    assert_eq!(s.files.public_view(&link.token, None, None).await.unwrap_err().code, "SHARE_NOT_FOUND");
 }
 
 #[tokio::test]
@@ -434,17 +435,28 @@ async fn expired_links_stop_working() {
     let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false, None).await.unwrap();
 
     let past = chrono::Utc::now() - chrono::Duration::minutes(1);
-    assert_eq!(s.files.create_share(&s.alice, file.id, Some(past)).await.unwrap_err().code, "INVALID_EXPIRY");
+    assert_eq!(
+        s.files
+            .create_share(&s.alice, file.id, ShareOptions { expires_at: Some(Some(past)), ..Default::default() })
+            .await
+            .unwrap_err()
+            .code,
+        "INVALID_EXPIRY"
+    );
 
     let tomorrow = chrono::Utc::now() + chrono::Duration::days(1);
-    let link = s.files.create_share(&s.alice, file.id, Some(tomorrow)).await.unwrap();
-    assert!(s.files.public_view(&link.token, None).await.is_ok());
+    let link = s
+        .files
+        .create_share(&s.alice, file.id, ShareOptions { expires_at: Some(Some(tomorrow)), ..Default::default() })
+        .await
+        .unwrap();
+    assert!(s.files.public_view(&link.token, None, None).await.is_ok());
 
     // Let the link expire by moving its expiry into the past.
     let mut row: share::ActiveModel = share::Entity::find_by_id(link.id).one(&s.db.conn).await.unwrap().unwrap().into();
     row.expires_at = Set(Some(past));
     row.update(&s.db.conn).await.unwrap();
-    assert_eq!(s.files.public_view(&link.token, None).await.unwrap_err().code, "SHARE_NOT_FOUND");
+    assert_eq!(s.files.public_view(&link.token, None, None).await.unwrap_err().code, "SHARE_NOT_FOUND");
 }
 
 #[tokio::test]
@@ -452,7 +464,7 @@ async fn only_the_owner_can_delete_a_link() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
     let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false, None).await.unwrap();
-    let link = s.files.create_share(&s.alice, file.id, None).await.unwrap();
+    let link = s.files.create_share(&s.alice, file.id, ShareOptions::default()).await.unwrap();
 
     assert_eq!(s.files.delete_share(&s.bob, link.id).await.unwrap_err().code, "SHARE_NOT_FOUND");
     assert!(s.files.shares(&s.bob).await.unwrap().is_empty());

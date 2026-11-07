@@ -204,6 +204,10 @@ pub mod share {
         pub owner_id: Uuid,
         pub expires_at: Option<DateTimeUtc>,
         pub created_at: DateTimeUtc,
+        /// Argon2 hash of the link's password; `None`: no password.
+        pub password_hash: Option<String>,
+        /// Whether visitors may upload files into the shared folder.
+        pub allow_upload: bool,
     }
 
     impl ActiveModelBehavior for ActiveModel {}

@@ -46,8 +46,13 @@ impl Files {
     }
 
     /// A folder reached through a public link as a zip archive.
-    pub async fn public_zip(self: &Arc<Self>, token: &str, node_id: Option<Uuid>) -> Result<ZipDownload> {
-        let folder = self.public_node(token, node_id).await?;
+    pub async fn public_zip(
+        self: &Arc<Self>,
+        token: &str,
+        key: Option<&str>,
+        node_id: Option<Uuid>,
+    ) -> Result<ZipDownload> {
+        let folder = self.public_node(token, key, node_id).await?;
         self.zip(folder).await
     }
 

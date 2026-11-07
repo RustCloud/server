@@ -161,6 +161,8 @@ pub struct Files {
     pub(crate) hints: tokio::sync::broadcast::Sender<Uuid>,
     /// Connections that wait for hints, per user.
     pub(crate) watchers: Arc<Watchers>,
+    /// Wrong passwords of public links, per link.
+    pub(crate) link_attempts: rustcloud_auth::AttemptLimiter,
 }
 
 /// The uploads of one user under way.
@@ -189,6 +191,7 @@ impl Files {
             noting: tokio::sync::Mutex::new(()),
             hints: tokio::sync::broadcast::channel(HINT_BACKLOG).0,
             watchers: Arc::default(),
+            link_attempts: rustcloud_auth::AttemptLimiter::new(crate::shares::ATTEMPTS_WINDOW),
         }
     }
 

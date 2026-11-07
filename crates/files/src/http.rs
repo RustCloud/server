@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use futures_util::TryStreamExt;
 use rustcloud_auth::{AdminUser, Auth, CurrentUser};
-use rustcloud_core::{ByteStream, Error, Result};
+use rustcloud_core::{ByteStream, ClientInfo, Error, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use uuid::Uuid;
@@ -24,7 +24,7 @@ use crate::archive::ZipDownload;
 use crate::changes::{ChangePage, ChangeWatch, HINT_EVERY, WATCH_TIME};
 use crate::content;
 use crate::service::{Files, Node, NodeUpdate, Usage};
-use crate::shares::{PublicView, Share};
+use crate::shares::{PublicView, Share, ShareOptions, LINK_COOKIE};
 use crate::storage::{SpeedTestResult, StorageReport};
 use crate::uploads::{NewUpload, Upload};
 use crate::versions::Versions;
@@ -60,10 +60,12 @@ where
         .route("/api/v1/files/{id}/versions/{version}/restore", post(restore_version))
         .route("/api/v1/usage", get(usage))
         .route("/api/v1/shares", get(list_shares).post(create_share))
-        .route("/api/v1/shares/{id}", delete(delete_share))
+        .route("/api/v1/shares/{id}", delete(delete_share).patch(update_share))
         .route("/api/v1/public/{token}", get(public_view))
         .route("/api/v1/public/{token}/content", get(public_download))
         .route("/api/v1/public/{token}/zip", get(public_zip))
+        .route("/api/v1/public/{token}/unlock", post(unlock_share))
+        .route("/api/v1/public/{token}/upload", post(public_upload))
         .route("/api/v1/admin/storage", get(storage))
         .route("/api/v1/admin/storage/speed-test", post(speed_test))
         .merge(crate::dav::router())
@@ -413,7 +415,8 @@ async fn list_shares(State(files): State<Arc<Files>>, current: CurrentUser) -> R
 #[derive(Deserialize)]
 struct NewShare {
     node_id: Uuid,
-    expires_at: Option<DateTime<Utc>>,
+    #[serde(flatten)]
+    options: ShareOptions,
 }
 
 async fn create_share(
@@ -421,8 +424,17 @@ async fn create_share(
     current: CurrentUser,
     Json(share): Json<NewShare>,
 ) -> Result<impl IntoResponse> {
-    let share = files.create_share(current.user(), share.node_id, share.expires_at).await?;
+    let share = files.create_share(current.user(), share.node_id, share.options).await?;
     Ok((StatusCode::CREATED, Json(share)))
+}
+
+async fn update_share(
+    State(files): State<Arc<Files>>,
+    current: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(options): Json<ShareOptions>,
+) -> Result<Json<Share>> {
+    Ok(Json(files.update_share(current.user(), id, options).await?))
 }
 
 async fn delete_share(
@@ -446,8 +458,62 @@ async fn public_view(
     State(files): State<Arc<Files>>,
     Path(token): Path<String>,
     Query(params): Query<PublicParams>,
+    headers: HeaderMap,
 ) -> Result<Json<PublicView>> {
-    Ok(Json(files.public_view(&token, params.node).await?))
+    Ok(Json(files.public_view(&token, link_key(&headers).as_deref(), params.node).await?))
+}
+
+#[derive(Deserialize)]
+struct Unlock {
+    password: String,
+}
+
+/// Checks a link's password; the answer sets the cookie that opens the
+/// link, for its own path only.
+async fn unlock_share(
+    State(files): State<Arc<Files>>,
+    Path(token): Path<String>,
+    client: ClientInfo,
+    Json(unlock): Json<Unlock>,
+) -> Result<Response> {
+    let key = files.unlock_share(&token, &unlock.password).await?;
+    let secure = if client.https { "; Secure" } else { "" };
+    let cookie = format!(
+        "{LINK_COOKIE}={key}; Path=/api/v1/public/{token}; Max-Age={}; HttpOnly; SameSite=Lax{secure}",
+        LINK_COOKIE_DAYS * 24 * 3600
+    );
+    Ok((StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response())
+}
+
+#[derive(Deserialize)]
+struct PublicUploadParams {
+    name: String,
+    /// The folder inside the shared one; the shared one when omitted.
+    node: Option<Uuid>,
+}
+
+async fn public_upload(
+    State(files): State<Arc<Files>>,
+    Path(token): Path<String>,
+    Query(params): Query<PublicUploadParams>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<impl IntoResponse> {
+    let key = link_key(&headers);
+    let node = files.public_upload(&token, key.as_deref(), params.node, &params.name, byte_stream(body)).await?;
+    Ok((StatusCode::CREATED, Json(node)))
+}
+
+/// The key of an unlocked link, from its cookie.
+fn link_key(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(name, _)| *name == LINK_COOKIE)
+        .map(|(_, value)| value.to_owned())
 }
 
 async fn public_download(
@@ -456,12 +522,14 @@ async fn public_download(
     Query(params): Query<PublicParams>,
     headers: HeaderMap,
 ) -> Result<Response> {
-    let node = files.public_file(&token, params.node).await?;
+    let key = link_key(&headers);
+    let key = key.as_deref();
+    let node = files.public_file(&token, key, params.node).await?;
     // A PDF is shown by the browser without a sandbox, on our address: one
     // from a stranger (anyone can make a public link) is only downloaded.
     let is_pdf = node.mime_type.as_deref() == Some("application/pdf");
     let attachment = params.download.is_some() || is_pdf;
-    content::serve(node, &headers, attachment, |range| files.public_download(&token, params.node, range)).await
+    content::serve(node, &headers, attachment, |range| files.public_download(&token, key, params.node, range)).await
 }
 
 async fn download_zip(State(files): State<Arc<Files>>, current: CurrentUser, Path(id): Path<Uuid>) -> Result<Response> {
@@ -472,9 +540,13 @@ async fn public_zip(
     State(files): State<Arc<Files>>,
     Path(token): Path<String>,
     Query(params): Query<PublicParams>,
+    headers: HeaderMap,
 ) -> Result<Response> {
-    Ok(zip_response(files.public_zip(&token, params.node).await?))
+    Ok(zip_response(files.public_zip(&token, link_key(&headers).as_deref(), params.node).await?))
 }
+
+/// How long a browser keeps the key of an unlocked link.
+const LINK_COOKIE_DAYS: u64 = 30;
 
 /// A zip archive as it is written; its size is not known before.
 fn zip_response(zip: ZipDownload) -> Response {

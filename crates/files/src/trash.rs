@@ -228,7 +228,7 @@ impl Files {
     }
 
     /// `name`, or with a number if it is taken in the folder: "report (2).pdf".
-    async fn free_name(&self, folder_id: Uuid, name: &str, is_dir: bool) -> Result<String> {
+    pub(crate) async fn free_name(&self, folder_id: Uuid, name: &str, is_dir: bool) -> Result<String> {
         if self.child_by_name(folder_id, name).await?.is_none() {
             return Ok(name.to_owned());
         }

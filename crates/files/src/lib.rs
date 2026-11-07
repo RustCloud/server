@@ -38,10 +38,12 @@
 //! | GET    | `/files/changes/watch`     | SSE: a hint whenever the feed has new ones |
 //! | GET    | `/usage`                   | used bytes and quota                       |
 //! | GET/POST | `/shares`                | list / create public links                 |
-//! | DELETE | `/shares/{id}`             | delete a public link                       |
+//! | PATCH/DELETE | `/shares/{id}`       | change (password, uploads) / delete a link |
 //! | GET    | `/public/{token}`          | public link: metadata and folder contents  |
 //! | GET    | `/public/{token}/content`  | public link: download                      |
 //! | GET    | `/public/{token}/zip`      | public link: a folder as a zip archive     |
+//! | POST   | `/public/{token}/unlock`   | public link: give its password `{password}`|
+//! | POST   | `/public/{token}/upload?name=` | public link: upload into the folder    |
 //! | GET    | `/admin/storage`           | storage size, use and speed (admins)       |
 //!
 //! WebDAV (`/dav/`, the user's root folder) is in the `dav` module: clients log in with
@@ -83,7 +85,7 @@ pub use http::router;
 pub use locks::{FileLock, Locking, LOCK_MAX};
 pub use service::{guess_mime, Download, Files, Node, NodeUpdate, Usage};
 pub use settings::FilesSettings;
-pub use shares::{PublicView, Share};
+pub use shares::{PublicView, Share, ShareOptions, LINK_COOKIE};
 pub use storage::{SpeedTestResult, StorageReport, NEARLY_FULL_PERCENT, SPEED_TEST_BYTES};
 pub use trash::TRASH_FOLDER;
 pub use uploads::{NewUpload, Upload, ABANDONED_AFTER, MAX_PARTS, MAX_UPLOADS};
