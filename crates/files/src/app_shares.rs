@@ -7,10 +7,16 @@
 //! owner revokes a share, or the other user gives it up; deleting the folder
 //! or one of the two accounts ends it too. Sharing and revoking are in the
 //! activity log.
+//!
+//! Sharing with a username nobody has answers as if it had worked: the
+//! share is kept (in `app_shares_unmatched`) and listed among those given,
+//! but opens nothing — so sharing doesn't tell which usernames exist. For
+//! the same reason the owner sees the people they shared with by username,
+//! not by display name.
 
 use rustcloud_auth::User;
 use rustcloud_core::{audit, Error, Result};
-use rustcloud_db::{app_share, user};
+use rustcloud_db::{app_share, app_share_unmatched, user};
 use sea_orm::sea_query::ExprTrait;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
@@ -83,14 +89,23 @@ impl Files {
             label => label.to_owned(),
         };
         let username = share.username.trim().to_lowercase();
-        let other = user::Entity::find()
-            .filter(user::Column::Username.eq(&username))
-            .one(&self.db)
-            .await?
-            .filter(|other| !other.disabled && other.id != owner.id)
-            .ok_or_else(|| {
-                Error::not_found("USER_NOT_FOUND", format!("There is no user \"{username}\" to share with"))
-            })?;
+        if username == owner.username {
+            return Err(Error::bad_request("SHARE_WITH_SELF", "This is your own account"));
+        }
+        let other = user::Entity::find().filter(user::Column::Username.eq(&username)).one(&self.db).await?;
+        audit!(
+            "app_share.create",
+            app = share.app_id,
+            name = label,
+            with = username,
+            write = share.write,
+            "app data shared"
+        );
+        let owner_person = person(owner.id, &owner.username, &owner.display_name);
+        let Some(other) = other else {
+            let row = self.share_with_nobody(owner, share, path, label, username).await?;
+            return Ok(unmatched_share(row, owner_person));
+        };
 
         let existing = app_share::Entity::find()
             .filter(app_share::Column::OwnerId.eq(owner.id))
@@ -121,16 +136,48 @@ impl Files {
                 .await?
             }
         };
-        audit!(
-            "app_share.create",
-            app = row.app_id,
-            name = row.label,
-            with = other.username,
-            write = row.write,
-            "app data shared"
-        );
-        let owner = Person { id: owner.id, username: owner.username.clone(), display_name: owner.display_name.clone() };
-        Ok(to_share(row, owner, person(other)))
+        Ok(to_share(row, owner_person, person(other.id, &other.username, &other.username)))
+    }
+
+    /// Keeps a share with a username nobody has, as a real one would be kept.
+    async fn share_with_nobody(
+        &self,
+        owner: &User,
+        share: NewAppShare,
+        path: String,
+        label: String,
+        username: String,
+    ) -> Result<app_share_unmatched::Model> {
+        let existing = app_share_unmatched::Entity::find()
+            .filter(app_share_unmatched::Column::OwnerId.eq(owner.id))
+            .filter(app_share_unmatched::Column::AppId.eq(&share.app_id))
+            .filter(app_share_unmatched::Column::Path.eq(&path))
+            .filter(app_share_unmatched::Column::Username.eq(&username))
+            .one(&self.db)
+            .await?;
+        Ok(match existing {
+            Some(row) => {
+                let mut row: app_share_unmatched::ActiveModel = row.into();
+                row.label = Set(label);
+                row.write = Set(share.write);
+                row.update(&self.db).await?
+            }
+            None => {
+                app_share_unmatched::ActiveModel {
+                    id: Set(Uuid::new_v4()),
+                    app_id: Set(share.app_id),
+                    owner_id: Set(owner.id),
+                    path: Set(path),
+                    label: Set(label),
+                    username: Set(username),
+                    person_id: Set(Uuid::new_v4()),
+                    write: Set(share.write),
+                    created_at: Set(chrono::Utc::now()),
+                }
+                .insert(&self.db)
+                .await?
+            }
+        })
     }
 
     /// The user's shares in all apps, newest first. Shares from disabled
@@ -147,12 +194,24 @@ impl Files {
             let (Some(owner), Some(other)) = (people.get(&row.owner_id), people.get(&row.user_id)) else {
                 continue;
             };
+            let owner_person = person(owner.id, &owner.username, &owner.display_name);
             if row.owner_id == user.id {
-                shares.given.push(to_share(row, person(owner.clone()), person(other.clone())));
+                shares.given.push(to_share(row, owner_person, person(other.id, &other.username, &other.username)));
             } else if !owner.disabled {
-                shares.received.push(to_share(row, person(owner.clone()), person(other.clone())));
+                shares.received.push(to_share(
+                    row,
+                    owner_person,
+                    person(other.id, &other.username, &other.display_name),
+                ));
             }
         }
+        let unmatched = app_share_unmatched::Entity::find()
+            .filter(app_share_unmatched::Column::OwnerId.eq(user.id))
+            .all(&self.db)
+            .await?;
+        let me = person(user.id, &user.username, &user.display_name);
+        shares.given.extend(unmatched.into_iter().map(|row| unmatched_share(row, me.clone())));
+        shares.given.sort_by_key(|share| std::cmp::Reverse(share.created_at));
         Ok(shares)
     }
 
@@ -165,6 +224,15 @@ impl Files {
 
     /// Ends a share: the owner revokes it, or the other user gives it up.
     pub async fn revoke_appdata_share(&self, user: &User, share_id: Uuid) -> Result<()> {
+        let unmatched = app_share_unmatched::Entity::find_by_id(share_id)
+            .filter(app_share_unmatched::Column::OwnerId.eq(user.id))
+            .one(&self.db)
+            .await?;
+        if let Some(row) = unmatched {
+            app_share_unmatched::Entity::delete_by_id(row.id).exec(&self.db).await?;
+            audit!("app_share.revoke", app = row.app_id, name = row.label, by = "owner", "app data no longer shared");
+            return Ok(());
+        }
         let row = app_share::Entity::find_by_id(share_id)
             .filter(app_share::Column::OwnerId.eq(user.id).or(app_share::Column::UserId.eq(user.id)))
             .one(&self.db)
@@ -229,6 +297,18 @@ impl Files {
         if !gone.is_empty() {
             app_share::Entity::delete_many().filter(app_share::Column::Id.is_in(gone)).exec(&self.db).await?;
         }
+        let rows = app_share_unmatched::Entity::find()
+            .filter(app_share_unmatched::Column::OwnerId.eq(owner.id))
+            .filter(app_share_unmatched::Column::AppId.eq(app_id))
+            .all(&self.db)
+            .await?;
+        let gone: Vec<Uuid> = rows.iter().filter(|row| inside(&row.path)).map(|row| row.id).collect();
+        if !gone.is_empty() {
+            app_share_unmatched::Entity::delete_many()
+                .filter(app_share_unmatched::Column::Id.is_in(gone))
+                .exec(&self.db)
+                .await?;
+        }
         Ok(())
     }
 
@@ -276,8 +356,22 @@ impl Files {
     }
 }
 
-fn person(row: user::Model) -> Person {
-    Person { id: row.id, username: row.username, display_name: row.display_name }
+fn person(id: Uuid, username: &str, display_name: &str) -> Person {
+    Person { id, username: username.to_owned(), display_name: display_name.to_owned() }
+}
+
+/// A share with nobody, as the owner sees it: like any other.
+fn unmatched_share(row: app_share_unmatched::Model, owner: Person) -> AppShare {
+    AppShare {
+        id: row.id,
+        app_id: row.app_id,
+        path: row.path,
+        label: row.label,
+        owner,
+        user: person(row.person_id, &row.username, &row.username),
+        write: row.write,
+        created_at: row.created_at,
+    }
 }
 
 fn to_share(row: app_share::Model, owner: Person, user: Person) -> AppShare {

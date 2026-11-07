@@ -394,6 +394,32 @@ pub mod app_share {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// A share of AppData with a username nobody has: it opens nothing, but
+/// the owner sees it like any other, so sharing doesn't tell which names exist.
+pub mod app_share_unmatched {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "app_shares_unmatched")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub app_id: String,
+        pub owner_id: Uuid,
+        pub path: String,
+        pub label: String,
+        /// The name the owner gave, lower-cased.
+        pub username: String,
+        /// Stands for the user's id in answers, as a real share has one.
+        pub person_id: Uuid,
+        pub write: bool,
+        pub created_at: DateTimeUtc,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 /// What the administrator set for a plugin. A plugin without a row runs
 /// with the defaults; one installed from the admin page starts disabled.
 pub mod plugin_config {

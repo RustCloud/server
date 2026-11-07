@@ -22,6 +22,7 @@
 //! | `app_grants` | access users gave apps to their files                       |
 //! | `app_passwords` | passwords for CalDAV and other clients, with their scopes |
 //! | `app_shares` | AppData folders users shared with other users               |
+//! | `app_shares_unmatched` | shares with names nobody has (look like real ones)  |
 //! | `plugin_configs` | what the administrator set for each plugin              |
 //! | `plugin_files` | each plugin's own storage on the server (models, caches)  |
 //! | `plugin_jobs` | background jobs of plugins, waiting or failed             |
@@ -35,8 +36,8 @@ mod migrations;
 pub mod testing;
 
 pub use entities::{
-    app_grant, app_password, app_share, file_change, file_lock, file_version, identity, log_entry, node, oidc_provider,
-    plugin_config, plugin_file, plugin_job, session, share, upload_part, upload_session, user,
+    app_grant, app_password, app_share, app_share_unmatched, file_change, file_lock, file_version, identity, log_entry,
+    node, oidc_provider, plugin_config, plugin_file, plugin_job, session, share, upload_part, upload_session, user,
 };
 pub use sea_orm::DatabaseConnection;
 

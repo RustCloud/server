@@ -27,6 +27,7 @@ impl MigratorTrait for Migrator {
             Box::new(DeviceSessions),
             Box::new(FileChanges),
             Box::new(UploadSessions),
+            Box::new(UnmatchedAppShares),
         ]
     }
 }
@@ -667,6 +668,40 @@ impl MigrationTrait for UploadSessions {
             )
             .await?;
         create_index(manager, "upload_parts", &["session_id", "start"], true).await
+    }
+}
+
+/// Shares of AppData with usernames nobody has (`app_shares_unmatched`):
+/// kept and listed like real ones, so sharing doesn't tell which names exist.
+struct UnmatchedAppShares;
+
+impl MigrationName for UnmatchedAppShares {
+    fn name(&self) -> &str {
+        "m0018_unmatched_app_shares"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for UnmatchedAppShares {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table("app_shares_unmatched")
+                    .col(pk_uuid("id"))
+                    .col(string("app_id"))
+                    .col(uuid("owner_id"))
+                    .col(string("path"))
+                    .col(string("label"))
+                    .col(string("username"))
+                    .col(uuid("person_id"))
+                    .col(boolean("write"))
+                    .col(timestamp_with_time_zone("created_at"))
+                    .foreign_key(&mut cascade_fk("app_shares_unmatched", "owner_id", "users"))
+                    .to_owned(),
+            )
+            .await?;
+        create_index(manager, "app_shares_unmatched", &["owner_id", "app_id", "path", "username"], true).await
     }
 }
 

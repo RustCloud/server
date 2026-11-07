@@ -1166,12 +1166,11 @@ async fn calendars_are_shared_read_only_or_for_changes() {
     let alices_events = format!("/app/calendar/api/events/{work}");
     assert_eq!(app.json(Method::POST, &alices_events, As::Browser(&alice), form.clone()).await.status, StatusCode::OK);
 
-    // Only folders of the owner's data, with other existing users.
+    // Only folders of the owner's data, with other users.
     let share = |path: &str, username: &str, write: bool| json!({ "app_id": "calendar", "path": path, "label": "Work", "username": username, "write": write });
     let path = format!("calendars/{work}");
     for (body, code) in [
-        (share(&path, "alice", false), "USER_NOT_FOUND"),
-        (share(&path, "nobody", false), "USER_NOT_FOUND"),
+        (share(&path, "alice", false), "SHARE_WITH_SELF"),
         (share("calendars/missing", "bob", false), "FILE_NOT_FOUND"),
         (share("", "bob", false), "INVALID_NAME"),
         (json!({ "app_id": "nope", "path": path, "username": "bob" }), "APP_NOT_FOUND"),
@@ -1187,6 +1186,25 @@ async fn calendars_are_shared_read_only_or_for_changes() {
         ids.push(format!("shared-{}", reply.json()["id"].as_str().unwrap()));
     }
     let (bobs, carols) = (&ids[0], &ids[1]);
+
+    // A name nobody has gets the same answer and is listed the same: names can't be guessed.
+    let nobody = app.json(Method::POST, "/api/v1/app-shares", As::Browser(&alice), share(&path, "Nobody", false)).await;
+    assert_eq!(nobody.status, StatusCode::CREATED);
+    let to_bob = app.get("/api/v1/app-shares", As::Browser(&alice)).await.json()["given"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|given| given["user"]["username"] == "bob")
+        .unwrap()
+        .clone();
+    let shape = |share: &Value| {
+        let mut keys: Vec<String> = share.as_object().unwrap().keys().cloned().collect();
+        keys.extend(share["user"].as_object().unwrap().keys().cloned());
+        keys
+    };
+    assert_eq!(shape(&nobody.json()), shape(&to_bob));
+    assert_eq!(nobody.json()["user"]["display_name"], "nobody");
+    assert_eq!(to_bob["user"]["display_name"], "bob", "the owner sees usernames, not display names");
 
     // Bob sees it next to his own calendar, read-only.
     let list = app.get(calendars, As::Browser(&bob)).await.json();
@@ -1226,11 +1244,12 @@ async fn calendars_are_shared_read_only_or_for_changes() {
     assert_eq!(left.status, StatusCode::OK);
     assert_eq!(app.get("/api/v1/app-shares", As::Browser(&bob)).await.json()["received"], json!([]));
     let given = app.get("/api/v1/app-shares", As::Browser(&alice)).await.json()["given"].clone();
-    assert_eq!(given.as_array().unwrap().len(), 1);
+    assert_eq!(given.as_array().unwrap().len(), 2, "carol's and nobody's");
     let alices_calendar = format!("{calendars}/{work}");
     let deleted = app.send(Method::DELETE, &alices_calendar, As::Browser(&alice), Body::empty(), &[]).await;
     assert_eq!(deleted.status, StatusCode::OK);
     assert_eq!(app.get("/api/v1/app-shares", As::Browser(&carol)).await.json()["received"], json!([]));
+    assert_eq!(app.get("/api/v1/app-shares", As::Browser(&alice)).await.json()["given"], json!([]));
     let list = app.get(calendars, As::Browser(&carol)).await.json();
     assert!(list.as_array().unwrap().iter().all(|c| c["id"] != *carols));
 }
