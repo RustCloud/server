@@ -121,11 +121,13 @@
             />
           </td>
           <td class="muted small">{formatDate(user.created_at, locale)}</td>
-          <td class="actions">
-            <button type="button" class="small" onclick={() => resetPassword(user)}>{t.resetPassword}</button>
-            {#if !isSelf}
-              <button type="button" class="small danger" onclick={() => remove(user)}>{t.deleteAccount}</button>
-            {/if}
+          <td>
+            <div class="actions">
+              <button type="button" class="small" onclick={() => resetPassword(user)}>{t.resetPassword}</button>
+              {#if !isSelf}
+                <button type="button" class="small danger" onclick={() => remove(user)}>{t.deleteAccount}</button>
+              {/if}
+            </div>
           </td>
         </tr>
       {/each}

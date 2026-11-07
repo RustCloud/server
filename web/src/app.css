@@ -78,7 +78,42 @@ input:not([type='checkbox']) {
   padding: 8px 10px;
 }
 
+select {
+  font: inherit;
+  color: var(--text);
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 32px 7px 10px;
+  appearance: none;
+  cursor: pointer;
+  /* A chevron in the text colour: two gradients drawn as a "v". */
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 16px) 50%,
+    calc(100% - 11px) 50%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+}
+
+option {
+  background: var(--surface);
+  color: var(--text);
+}
+
+select:hover {
+  background-color: var(--hover);
+}
+
+select:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 input:focus-visible,
+select:focus-visible,
 button:focus-visible,
 a:focus-visible,
 summary:focus-visible {

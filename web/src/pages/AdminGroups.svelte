@@ -2,6 +2,7 @@
 <script lang="ts">
   import { api, type Group, type User } from '../lib/api';
   import { errorText, t } from '../lib/i18n';
+  import Icon from '../components/Icon.svelte';
 
   let groups = $state<Group[]>([]);
   let users = $state<User[]>([]);
@@ -44,6 +45,11 @@
   }
 
   refresh();
+
+  /** Users not yet in the group. */
+  function candidates(group: Group) {
+    return users.filter((u) => !group.members.some((m) => m.id === u.id));
+  }
 </script>
 
 {#if error}<p class="error">{error}</p>{/if}
@@ -69,19 +75,25 @@
           >
         </span>
       {/each}
-      <select
-        aria-label={t.addMember}
-        onchange={(e) => {
-          const id = e.currentTarget.value;
-          e.currentTarget.value = '';
-          if (id) run(() => api.addMember(group.id, id));
-        }}
-      >
-        <option value="">{t.addMember}</option>
-        {#each users.filter((u) => !group.members.some((m) => m.id === u.id)) as user (user.id)}
-          <option value={user.id}>{user.username}</option>
-        {/each}
-      </select>
+      {#if candidates(group).length > 0}
+        <details class="menu add-member">
+          <summary class="button small"><Icon name="plus" /> {t.addMember}</summary>
+          <div class="menu-items">
+            {#each candidates(group) as user (user.id)}
+              <button
+                type="button"
+                onclick={(e) => {
+                  (e.currentTarget as HTMLElement).closest('details')?.removeAttribute('open');
+                  run(() => api.addMember(group.id, user.id));
+                }}
+              >
+                <Icon name="user" />
+                {user.username}
+              </button>
+            {/each}
+          </div>
+        </details>
+      {/if}
     </div>
   </section>
 {/each}
@@ -125,6 +137,12 @@
     background: none;
     cursor: pointer;
     color: var(--muted);
+  }
+  .add-member .menu-items {
+    left: 0;
+    right: auto;
+    max-height: 260px;
+    overflow-y: auto;
   }
   .new-group {
     display: flex;
