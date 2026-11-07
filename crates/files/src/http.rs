@@ -63,6 +63,7 @@ where
         .route("/api/v1/public/{token}/content", get(public_download))
         .route("/api/v1/admin/storage", get(storage))
         .route("/api/v1/admin/storage/speed-test", post(speed_test))
+        .merge(crate::dav::router())
 }
 
 async fn storage(State(files): State<Arc<Files>>, _admin: AdminUser) -> Result<Json<StorageReport>> {
@@ -232,7 +233,7 @@ async fn replace_content(
 
 /// The mtime of an uploaded file: Unix time in seconds (`1730985600`,
 /// `1730985600.25`) or RFC 3339 (`2024-11-07T13:20:00Z`).
-fn parse_mtime(text: &str) -> Result<DateTime<Utc>> {
+pub(crate) fn parse_mtime(text: &str) -> Result<DateTime<Utc>> {
     let invalid = || Error::bad_request("INVALID_MTIME", "mtime must be Unix seconds or an RFC 3339 time");
     let text = text.trim();
     if let Ok(seconds) = text.parse::<f64>() {
@@ -461,7 +462,7 @@ async fn public_download(
 }
 
 /// The request body as a stream of byte chunks.
-fn byte_stream(body: Body) -> ByteStream {
+pub(crate) fn byte_stream(body: Body) -> ByteStream {
     Box::pin(body.into_data_stream().map_err(io::Error::other))
 }
 

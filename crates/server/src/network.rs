@@ -2,9 +2,11 @@
 //! the addresses the server answers on, client addresses behind reverse
 //! proxies, and which other web sites may call the API (CORS).
 
+use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -13,10 +15,12 @@ use axum::http::uri::Authority;
 use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use futures_util::future::BoxFuture;
 use ipnet::IpNet;
 use rustcloud_core::{ClientInfo, Error, Field, Live, Result, Settings};
 use serde::{Deserialize, Serialize};
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower::{Layer, Service, ServiceExt};
+use tower_http::cors::{AllowOrigin, Cors, CorsLayer};
 use tracing::Instrument;
 use url::Url;
 
@@ -273,6 +277,50 @@ pub fn cors(settings: Arc<Live<ServerSettings>>) -> CorsLayer {
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::RANGE, header::IF_NONE_MATCH])
         .expose_headers([header::CONTENT_RANGE, header::CONTENT_DISPOSITION, header::ETAG])
         .max_age(Duration::from_secs(3600))
+}
+
+/// [`cors`] for browsers' preflight requests only. `CorsLayer` answers
+/// every OPTIONS request itself; WebDAV and CalDAV clients send OPTIONS to
+/// ask what a path supports, and those must reach the routes.
+#[derive(Clone)]
+pub struct PreflightCors(pub CorsLayer);
+
+impl<S: Clone> Layer<S> for PreflightCors {
+    type Service = PreflightCorsService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        PreflightCorsService { cors: self.0.layer(inner.clone()), inner }
+    }
+}
+
+#[derive(Clone)]
+pub struct PreflightCorsService<S> {
+    cors: Cors<S>,
+    inner: S,
+}
+
+impl<S> Service<Request> for PreflightCorsService<S>
+where
+    S: Service<Request, Response = Response, Error = Infallible> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = Response;
+    type Error = Infallible;
+    type Future = BoxFuture<'static, Result<Response, Infallible>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        // Each call takes a clone and waits for it to be ready.
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: Request) -> Self::Future {
+        let preflight = request.headers().contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+        if request.method() == Method::OPTIONS && !preflight {
+            Box::pin(self.inner.clone().oneshot(request))
+        } else {
+            Box::pin(self.cors.clone().oneshot(request))
+        }
+    }
 }
 
 #[cfg(test)]

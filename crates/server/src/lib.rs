@@ -209,7 +209,7 @@ pub fn app(state: AppState) -> Router {
     api.merge(web)
         // Paths of plugins' services go to them, before the routes and the web UI.
         .layer(middleware::from_fn_with_state(state.clone(), service_proxy::route))
-        .layer(network::cors(state.server.clone()))
+        .layer(network::PreflightCors(network::cors(state.server.clone())))
         .layer(middleware::from_fn_with_state(guard, network::guard))
         .layer(SetResponseHeaderLayer::overriding(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")))
         .layer(SetResponseHeaderLayer::if_not_present(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY")))

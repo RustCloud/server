@@ -2582,3 +2582,110 @@ async fn large_files_are_uploaded_in_parts() {
     assert_eq!(content.text(), "0123456789");
     assert_eq!(app.get(&uri, As::Browser(cookie)).await.status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn files_are_reached_over_webdav() {
+    let app = TestApp::new().await;
+    let alice = app.register("alice").await;
+    let mut passwords = Vec::new();
+    for access in ["write", "read"] {
+        let body = json!({ "name": "Laptop", "scopes": [{ "app": "files", "access": access }] });
+        let reply = app.json(Method::POST, "/api/v1/app-passwords", As::Browser(&alice), body).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text());
+        passwords.push(reply.json()["password"].as_str().unwrap().to_owned());
+    }
+    let (laptop, reader) = (passwords[0].as_str(), passwords[1].as_str());
+
+    // Clients ask what the server can, then for a password.
+    let options = app.send(Method::OPTIONS, "/dav/", As::Anonymous, Body::empty(), &[]).await;
+    assert_eq!(options.header(header::HeaderName::from_static("dav")), "1, 2");
+    let propfind = Method::from_bytes(b"PROPFIND").unwrap();
+    let asked = app.send(propfind, "/dav/", As::Anonymous, Body::empty(), &[]).await;
+    assert_eq!(asked.status, StatusCode::UNAUTHORIZED);
+    assert!(asked.header(header::WWW_AUTHENTICATE).starts_with("Basic"));
+
+    assert_eq!(dav(&app, laptop, "MKCOL", "/dav/Docs", "", &[]).await.status, StatusCode::CREATED);
+    assert_eq!(dav(&app, laptop, "MKCOL", "/dav/Docs", "", &[]).await.status, StatusCode::METHOD_NOT_ALLOWED);
+    let put = dav(&app, laptop, "PUT", "/dav/Docs/a%20b.txt", "hello", &[("x-oc-mtime", "1730985600")]).await;
+    assert_eq!(put.status, StatusCode::CREATED, "{}", put.text());
+    assert_eq!(put.header(header::HeaderName::from_static("x-oc-mtime")), "accepted");
+    let etag = put.header(header::ETAG).to_owned();
+    assert_eq!(dav(&app, laptop, "PUT", "/dav/Nope/x.txt", "x", &[]).await.status, StatusCode::CONFLICT);
+
+    // A folder lists itself and what is in it, with what the client asked for.
+    let props = r#"<d:propfind xmlns:d="DAV:" xmlns:z="urn:z"><d:prop>
+        <d:getcontentlength/><d:getlastmodified/><d:resourcetype/><z:color/></d:prop></d:propfind>"#;
+    let listed = dav(&app, laptop, "PROPFIND", "/dav/Docs/", props, &[("depth", "1")]).await;
+    assert_eq!(listed.status.as_u16(), 207);
+    let text = listed.text();
+    assert!(text.contains("<D:href>/dav/Docs/</D:href>"), "{text}");
+    assert!(text.contains("<D:href>/dav/Docs/a%20b.txt</D:href>"), "{text}");
+    assert!(text.contains("<D:getcontentlength>5</D:getcontentlength>"), "{text}");
+    assert!(text.contains("Thu, 07 Nov 2024 13:20:00 GMT"), "the mtime the client gave: {text}");
+    assert!(text.contains("<D:collection/>"), "{text}");
+    assert!(text.contains("<x:color xmlns:x=\"urn:z\"/>") && text.contains("404 Not Found"), "{text}");
+    let all = dav(&app, laptop, "PROPFIND", "/dav/", "", &[("depth", "1")]).await.text();
+    assert!(all.contains("<D:href>/dav/Docs/</D:href>"), "{all}");
+
+    let got = dav(&app, laptop, "GET", "/dav/Docs/a%20b.txt", "", &[]).await;
+    assert_eq!(got.text(), "hello");
+    assert_eq!(got.header(header::LAST_MODIFIED), "Thu, 07 Nov 2024 13:20:00 GMT");
+
+    // Overwriting checks the ETag, if the client gives one.
+    let stale = dav(&app, laptop, "PUT", "/dav/Docs/a%20b.txt", "lost", &[("if-match", "\"0000\"")]).await;
+    assert_eq!(stale.status, StatusCode::PRECONDITION_FAILED);
+    let fresh = dav(&app, laptop, "PUT", "/dav/Docs/a%20b.txt", "hello!", &[("if-match", &etag)]).await;
+    assert_eq!(fresh.status, StatusCode::NO_CONTENT);
+
+    // Copy, move, and moving over something only when allowed.
+    let to_copy = [("destination", "http://localhost/dav/Copy.txt")];
+    assert_eq!(dav(&app, laptop, "COPY", "/dav/Docs/a%20b.txt", "", &to_copy).await.status, StatusCode::CREATED);
+    let over = [("destination", "/dav/Docs/a%20b.txt"), ("overwrite", "F")];
+    assert_eq!(dav(&app, laptop, "MOVE", "/dav/Copy.txt", "", &over).await.status, StatusCode::PRECONDITION_FAILED);
+    let to_move = [("destination", "/dav/Docs/Moved.txt")];
+    assert_eq!(dav(&app, laptop, "MOVE", "/dav/Copy.txt", "", &to_move).await.status, StatusCode::CREATED);
+    assert_eq!(dav(&app, laptop, "GET", "/dav/Docs/Moved.txt", "", &[]).await.text(), "hello!");
+    assert_eq!(dav(&app, laptop, "GET", "/dav/Copy.txt", "", &[]).await.status, StatusCode::NOT_FOUND);
+    let into_itself = [("destination", "/dav/Docs/Inner/")];
+    assert_eq!(dav(&app, laptop, "MOVE", "/dav/Docs/", "", &into_itself).await.status, StatusCode::FORBIDDEN);
+
+    // Windows sets the time of a file it copied; other properties are refused.
+    let patch = r#"<d:propertyupdate xmlns:d="DAV:" xmlns:w="urn:schemas-microsoft-com:"><d:set><d:prop>
+        <w:Win32LastModifiedTime>Wed, 20 Feb 2008 17:44:48 GMT</w:Win32LastModifiedTime>
+        <w:Win32FileAttributes>00000020</w:Win32FileAttributes></d:prop></d:set></d:propertyupdate>"#;
+    let patched = dav(&app, laptop, "PROPPATCH", "/dav/Docs/Moved.txt", patch, &[]).await;
+    assert_eq!(patched.status.as_u16(), 207);
+    assert!(patched.text().contains("200 OK") && !patched.text().contains("403"), "{}", patched.text());
+    let moved = dav(&app, laptop, "GET", "/dav/Docs/Moved.txt", "", &[]).await;
+    assert_eq!(moved.header(header::LAST_MODIFIED), "Wed, 20 Feb 2008 17:44:48 GMT");
+    let foreign = r#"<d:propertyupdate xmlns:d="DAV:"><d:set><d:prop><d:displayname>x</d:displayname>
+        </d:prop></d:set></d:propertyupdate>"#;
+    let refused = dav(&app, laptop, "PROPPATCH", "/dav/Docs/Moved.txt", foreign, &[]).await.text();
+    assert!(refused.contains("403 Forbidden"), "{refused}");
+
+    // Locks are granted (Finder and Windows need them); locking a new name makes the file.
+    let lockinfo = r#"<d:lockinfo xmlns:d="DAV:"><d:lockscope><d:exclusive/></d:lockscope>
+        <d:locktype><d:write/></d:locktype></d:lockinfo>"#;
+    let locked = dav(&app, laptop, "LOCK", "/dav/new.txt", lockinfo, &[]).await;
+    assert_eq!(locked.status, StatusCode::CREATED, "{}", locked.text());
+    assert!(locked.header(header::HeaderName::from_static("lock-token")).starts_with("<opaquelocktoken:"));
+    assert_eq!(dav(&app, laptop, "UNLOCK", "/dav/new.txt", "", &[]).await.status, StatusCode::NO_CONTENT);
+
+    // Deleting goes to the trash, which WebDAV doesn't show.
+    assert_eq!(dav(&app, laptop, "DELETE", "/dav/Docs/Moved.txt", "", &[]).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(dav(&app, laptop, "GET", "/dav/Docs/Moved.txt", "", &[]).await.status, StatusCode::NOT_FOUND);
+    let trash = app.get("/api/v1/files/trash", As::Browser(&alice)).await.json();
+    let in_trash = format!("/api/v1/files/{}/children", trash["id"].as_str().unwrap());
+    assert_eq!(app.get(&in_trash, As::Browser(&alice)).await.json()[0]["name"], "Moved.txt");
+    assert!(!dav(&app, laptop, "PROPFIND", "/dav/", "", &[("depth", "1")]).await.text().contains(".trash"));
+    assert_eq!(dav(&app, laptop, "PROPFIND", "/dav/.trash/", "", &[]).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(dav(&app, laptop, "MKCOL", "/dav/.trash", "", &[]).await.status, StatusCode::FORBIDDEN);
+
+    // A password for reading only reads.
+    let read = dav_as(&app, "alice", reader, "PROPFIND", "/dav/", "", &[("depth", "0")]).await;
+    assert_eq!(read.status.as_u16(), 207);
+    let write = dav_as(&app, "alice", reader, "PUT", "/dav/x.txt", "x", &[]).await;
+    assert_eq!(write.status, StatusCode::FORBIDDEN);
+    let wrong = dav_as(&app, "alice", "wrong", "PROPFIND", "/dav/", "", &[]).await;
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+}

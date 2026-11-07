@@ -85,6 +85,9 @@ prost = "0.14"
 
 # Misc
 mime_guess = "2"
+# WebDAV: request bodies and paths
+quick-xml = "0.38"
+percent-encoding = "2"
 rust-embed = "8"
 figment = { version = "0.10", features = ["toml", "env"] }
 toml = "0.8"

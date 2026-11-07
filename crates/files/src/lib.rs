@@ -41,6 +41,9 @@
 //! | GET    | `/public/{token}`          | public link: metadata and folder contents  |
 //! | GET    | `/public/{token}/content`  | public link: download                      |
 //! | GET    | `/admin/storage`           | storage size, use and speed (admins)       |
+//!
+//! WebDAV (`/dav/`, the user's root folder) is in the `dav` module: clients log in with
+//! an app password for `files`.
 //! | POST   | `/admin/storage/speed-test`| run a storage speed test (admins)          |
 
 mod app;
@@ -49,6 +52,7 @@ mod app_shares;
 mod appdata;
 mod changes;
 pub mod content;
+mod dav;
 mod events;
 mod grants;
 mod http;

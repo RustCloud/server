@@ -7,6 +7,7 @@ JSON API под `/api/v1`. Маршруты собирает [server/src/lib.rs]
 |--------------------------------|---------------------------------------------------|
 | [Аккаунты и вход](auth.md)     | `/auth/*`, `/admin/users`                         |
 | [Файлы](files.md)              | `/files/*` (и [лента изменений](files.md#лента-изменений)), `/usage` |
+| [WebDAV](webdav.md)            | `/dav/` — файлы для ОС и программ (не под `/api/v1`) |
 | [Публичные ссылки](shares.md)  | `/shares`, `/public/{token}`                      |
 | [Приложения](apps.md)          | `/apps`                                           |
 | [Доступ приложений](grants.md) | `/grants`                                         |
@@ -25,7 +26,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/files/root
 
 Клиентские приложения получают короткоживущий access-токен через браузер — см.
 [Вход приложений](auth.md#вход-приложений). Браузер вместо этого получает HttpOnly-cookie `rustcloud_session`. Программы вроде CalDAV-клиентов
-входят в плагины по Basic с [паролем приложения](app-passwords.md).
+входят в плагины и в [WebDAV](webdav.md) по Basic с [паролем приложения](app-passwords.md).
 
 ## CSRF
 

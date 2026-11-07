@@ -119,3 +119,22 @@
 | 429    | `SERVER_BUSY`       | заняты все места для проверки паролей или запросов к плагинам |
 | 500    | `APP_FAILED`        | плагин упал, превысил память или время             |
 | 500    | `INTERNAL`          | ошибка сервера; подробности — в [журнале](../admin.md#журнал) |
+
+## WebDAV
+
+Только под [`/dav/`](webdav.md). Там же `FILE_CHANGED` отвечает `412`, `QUOTA_EXCEEDED` и
+`STORAGE_FULL` — `507`, `FILE_LOCKED` — `423`.
+
+| Статус | Код                      | Когда                                              |
+|--------|--------------------------|----------------------------------------------------|
+| 400    | `BAD_PATH`               | в пути `.`, `..` или не UTF-8                      |
+| 400    | `INVALID_XML`, `XML_TOO_LARGE` | тело не XML, не тот корневой элемент, > 10 000 элементов |
+| 400    | `NO_DESTINATION`         | `COPY`/`MOVE` без `Destination`                    |
+| 400    | `NO_LOCK`                | продление `LOCK` без токена в `If`                 |
+| 403    | `INTO_ITSELF`            | папку в саму себя, или поверх папки, где она лежит |
+| 405    | `METHOD_NOT_ALLOWED`     | `MKCOL` на занятое имя, `PUT` на папку, чужой метод |
+| 409    | `PARENT_NOT_FOUND`       | нет папки, в которую кладут                        |
+| 412    | `PRECONDITION_FAILED`    | `If-Match`/`If-None-Match` не совпали, `Overwrite: F` и место занято |
+| 413    | `BODY_TOO_LARGE`         | XML-тело больше 1 МБ                               |
+| 415    | `UNSUPPORTED_MEDIA_TYPE` | `MKCOL` с телом                                    |
+| 502    | `BAD_DESTINATION`        | `Destination` не под `/dav/` этого сервера         |
