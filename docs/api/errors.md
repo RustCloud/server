@@ -17,6 +17,8 @@
 | `INVALID_MTIME`        | `mtime` не разобрать, раньше 1970 года или больше чем на сутки вперёд |
 | `INVALID_CURSOR`       | курсор [ленты изменений](files.md#лента-изменений) выдан не сервером |
 | `TOO_MANY_FILES`       | больше 100 000 файлов и папок в [архиве](files.md#папка-архивом) |
+| `CANNOT_SHARE`         | `.appdata` не открывается [людям](sharing.md) — только из приложений |
+| `INVALID_SHARE`        | для [доступа](sharing.md) нужно имя пользователя или группа, не оба |
 | `WEAK_LINK_PASSWORD`   | пароль [публичной ссылки](shares.md#пароль) короче 4 символов |
 | `SHARE_WITH_SELF`      | [общий доступ к данным приложения](app-shares.md) самому себе |
 | `INVALID_SIZE`         | отрицательный размер [загрузки по частям](files.md#загрузка-по-частям) |
@@ -74,6 +76,8 @@
 | `APP_PASSWORD_SCOPE`  | пароль приложения не открывает это приложение         |
 | `PASSWORD_REQUIRED`   | у [публичной ссылки](shares.md#пароль) пароль, а ключа нет или он устарел |
 | `WRONG_LINK_PASSWORD` | неверный пароль публичной ссылки                      |
+| `READ_ONLY_SHARE`     | [общий доступ](sharing.md) только для чтения          |
+| `SHARED_ROOT`         | общую папку переименовывает, переносит и удаляет только владелец |
 | `UPLOAD_NOT_ALLOWED`  | ссылка не принимает [загрузки](shares.md#загрузка-посетителями) |
 | `PLUGIN_REQUIRED`     | плагин — часть сервера, его не отключить              |
 | `PLUGIN_NOT_REMOVABLE` | плагин поставляется с сервером — его отключают, а не удаляют |
@@ -81,7 +85,7 @@
 
 ## 404 Not Found
 
-`FILE_NOT_FOUND`, `VERSION_NOT_FOUND`, `NO_THUMBNAIL`, `USER_NOT_FOUND`, `SHARE_NOT_FOUND` (в т.ч. истёкшая ссылка и закрытый
+`FILE_NOT_FOUND`, `VERSION_NOT_FOUND`, `NO_THUMBNAIL`, `GROUP_NOT_FOUND`, `USER_NOT_FOUND`, `SHARE_NOT_FOUND` (в т.ч. истёкшая ссылка и закрытый
 [общий доступ](app-shares.md)),
 `SETTINGS_NOT_FOUND`, `OIDC_PROVIDER_NOT_FOUND`, `LOGIN_NOT_FOUND`, `SESSION_NOT_FOUND`, `UPLOAD_NOT_FOUND` (в т.ч. брошенная загрузка по частям), `APP_NOT_FOUND` (в т.ч. отключённый плагин), `PLUGIN_NOT_FOUND`, `GRANT_NOT_FOUND` (в т.ч. закончившаяся сессия), `APP_PASSWORD_NOT_FOUND`,
 `NOT_FOUND` (нет такого API-маршрута).
@@ -91,6 +95,7 @@
 | Код                | Когда                                              |
 |--------------------|----------------------------------------------------|
 | `NAME_TAKEN`       | в папке уже есть элемент с таким именем            |
+| `GROUP_EXISTS`     | группа с таким названием уже есть                  |
 | `ALREADY_EXISTS`   | то же, обнаружено базой при одновременных запросах |
 | `USERNAME_TAKEN`   | имя пользователя занято                            |
 | `LOGIN_TAKEN`      | учётная запись сервиса входа привязана к другому аккаунту |

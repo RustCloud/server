@@ -3,8 +3,8 @@
 //!
 //! - Metadata (names, folders, owners) lives in the database (`nodes` table).
 //! - Content lives in a [`BlobStore`](rustcloud_core::BlobStore) chosen at startup.
-//! - All access decisions go through one function, `Files::check_access`, so
-//!   sharing with users and groups can be added in one place later.
+//! - Access: the owner's own files through `Files::accessible`; files shared
+//!   with users and groups through `Files::reach` (see the `sharing` module).
 //!
 //! HTTP API (all under `/api/v1`):
 //!
@@ -32,6 +32,9 @@
 //! | GET    | `/files/{id}/versions/{v}/content` | download a version                 |
 //! | POST   | `/files/{id}/versions/{v}/restore` | make a version current             |
 //! | GET    | `/files/trash`             | the user's trash folder (`.trash`)         |
+//! | GET    | `/files/shared`            | what others shared with the user           |
+//! | GET/POST | `/files/{id}/access`     | whom a node is shared with / share it      |
+//! | PATCH/DELETE | `/access/{id}`       | change / end a share (owner or recipient)  |
 //! | DELETE | `/files/trash`             | empty the trash                            |
 //! | GET    | `/files/search?q=`         | search by name                             |
 //! | GET    | `/files/changes?cursor=`   | change feed of sync clients                |
@@ -66,6 +69,7 @@ mod locks;
 mod service;
 mod settings;
 mod shares;
+mod sharing;
 mod storage;
 mod trash;
 mod uploads;
@@ -86,6 +90,7 @@ pub use locks::{FileLock, Locking, LOCK_MAX};
 pub use service::{guess_mime, Download, Files, Node, NodeUpdate, Usage};
 pub use settings::FilesSettings;
 pub use shares::{PublicView, Share, ShareOptions, LINK_COOKIE};
+pub use sharing::{Access, GroupRef, NewAccess, Received};
 pub use storage::{SpeedTestResult, StorageReport, NEARLY_FULL_PERCENT, SPEED_TEST_BYTES};
 pub use trash::TRASH_FOLDER;
 pub use uploads::{NewUpload, Upload, ABANDONED_AFTER, MAX_PARTS, MAX_UPLOADS};

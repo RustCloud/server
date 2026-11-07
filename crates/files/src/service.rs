@@ -12,6 +12,7 @@ use rustcloud_db::node;
 
 use crate::changes::{ChangeKind, Watchers, HINT_BACKLOG};
 use crate::events::{FileEvent, FileEventKind, EVENT_BACKLOG};
+use crate::sharing::Reach;
 use sea_orm::sea_query::{Expr, Func, LikeExpr};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ExprTrait, QueryFilter, QuerySelect, Set,
@@ -233,15 +234,21 @@ impl Files {
     }
 
     pub async fn get(&self, user: &User, id: Uuid) -> Result<Node> {
-        let mut node = vec![Node::from(self.accessible(user, id).await?)];
+        let mut node = vec![Node::from(self.readable(user, id).await?)];
         self.add_locks(&mut node).await?;
         Ok(node.remove(0))
     }
 
-    /// The folders above a node, root first (the node itself is not included).
+    /// The folders above a node, root first (the node itself is not
+    /// included). Through a share: from the shared folder down.
     pub async fn ancestors(&self, user: &User, id: Uuid) -> Result<Vec<Node>> {
-        let node = self.accessible(user, id).await?;
-        Ok(self.ancestor_rows(&node).await?.into_iter().map(Node::from).collect())
+        let (node, reach) = self.reach(user, id).await?;
+        let mut chain = self.ancestor_rows(&node).await?;
+        if let Reach::Shared { top, .. } = reach {
+            let start = chain.iter().position(|folder| folder.id == top).unwrap_or(chain.len());
+            chain.drain(..start);
+        }
+        Ok(chain.into_iter().map(Node::from).collect())
     }
 
     /// Contents of a folder: folders first, then files, each sorted by name.
@@ -313,7 +320,8 @@ impl Files {
             return Ok((self.write_content(user, existing, body, writer).await?, true));
         }
 
-        let stored = self.store(user, body, writer.reserved, writer.sha256).await?;
+        let payer = self.payer(user, parent.owner_id).await?;
+        let stored = self.store(&payer, body, writer.reserved, writer.sha256).await?;
         let mut file = new_node(parent.owner_id, Some(parent.id), name, false);
         file.size = Set(stored.size);
         file.mime_type = Set(Some(guess_mime(name)));
@@ -325,7 +333,7 @@ impl Files {
         match file.insert(&self.db).await {
             Ok(file) => {
                 self.note(ChangeKind::Created, &file).await;
-                self.fit_quota(user).await;
+                self.fit_quota(&payer).await;
                 Ok((file.into(), false))
             }
             Err(err) => {
@@ -346,7 +354,7 @@ impl Files {
         mtime: Option<DateTime<Utc>>,
     ) -> Result<Node> {
         let mtime = mtime.map(check_mtime).transpose()?;
-        let file = self.accessible(user, id).await?;
+        let (file, _) = self.writable(user, id).await?;
         if file.is_dir {
             return Err(Error::bad_request("NOT_A_FILE", "This is a folder"));
         }
@@ -361,7 +369,7 @@ impl Files {
     /// Opens a file for reading. `range` must already fit inside the file
     /// (see [`crate::content::parse_range`]).
     pub async fn download(&self, user: &User, id: Uuid, range: Option<ByteRange>) -> Result<Download> {
-        let file = self.accessible(user, id).await?;
+        let file = self.readable(user, id).await?;
         if starts_reading(range) {
             audit!("file.download", name = file.name, size = file.size, "file downloaded");
         }
@@ -374,7 +382,8 @@ impl Files {
             Some(_) => Some(self.moving.lock().await),
             None => None,
         };
-        let node = self.accessible(user, id).await?;
+        let (node, reach) = self.writable(user, id).await?;
+        Self::refuse_shared_top(&node, reach)?;
         if node.parent_id.is_none() {
             return Err(Error::bad_request("ROOT_FOLDER", "The root folder cannot be renamed or moved"));
         }
@@ -437,25 +446,26 @@ impl Files {
 
     /// Copies a file or a whole folder into `target_id`, optionally under a new name.
     pub async fn copy(&self, user: &User, id: Uuid, target_id: Uuid, name: Option<&str>) -> Result<Node> {
-        let source = self.accessible(user, id).await?;
+        let source = self.readable(user, id).await?;
         if source.parent_id.is_none() {
             return Err(Error::bad_request("ROOT_FOLDER", "The root folder cannot be copied"));
         }
         let target = self.writable_folder(user, target_id).await?;
+        let payer = self.payer(user, target.owner_id).await?;
         let name = validate::file_name(name.unwrap_or(&source.name))?.to_owned();
         if source.is_dir && self.is_inside(&target, source.id).await? {
             return Err(Error::bad_request("COPY_INTO_ITSELF", "A folder cannot be copied into itself"));
         }
 
         let total: i64 = self.subtree(&source).await?.iter().map(|n| n.size).sum();
-        if let Some(remaining) = self.remaining_quota(user).await? {
+        if let Some(remaining) = self.remaining_quota(&payer).await? {
             if total > remaining {
                 return Err(quota_exceeded());
             }
         }
         let mut created = HashSet::new();
         let copy = self.copy_recursive(&source, &target, &name, &mut created).await?;
-        self.fit_quota(user).await;
+        self.fit_quota(&payer).await;
         let files = self.watched_or_none(&copy).await;
         self.emit(FileEventKind::Created, copy.owner_id, files, None);
         audit!("file.copy", name = source.name, new_name = copy.name, "copied");
@@ -466,7 +476,8 @@ impl Files {
     /// the trash, deletes it for good.
     pub async fn delete(&self, user: &User, id: Uuid) -> Result<()> {
         let _moving = self.moving.lock().await;
-        let node = self.accessible(user, id).await?;
+        let (node, reach) = self.writable(user, id).await?;
+        Self::refuse_shared_top(&node, reach)?;
         if node.parent_id.is_none() {
             return Err(Error::bad_request("ROOT_FOLDER", "The root folder cannot be deleted"));
         }
@@ -566,18 +577,22 @@ impl Files {
         Ok(node)
     }
 
-    /// Loads a folder the user may access.
+    /// Loads a folder the user may read: their own or shared with them.
     async fn accessible_folder(&self, user: &User, id: Uuid) -> Result<node::Model> {
-        let node = self.accessible(user, id).await?;
+        let node = self.readable(user, id).await?;
         if !node.is_dir {
             return Err(Error::bad_request("NOT_A_FOLDER", "This is not a folder"));
         }
         Ok(node)
     }
 
-    /// A folder the user may put things in: not in the trash.
+    /// A folder the user may put things in: their own or shared with them
+    /// for changes, not in the trash.
     pub(crate) async fn writable_folder(&self, user: &User, id: Uuid) -> Result<node::Model> {
-        let folder = self.accessible_folder(user, id).await?;
+        let (folder, _) = self.writable(user, id).await?;
+        if !folder.is_dir {
+            return Err(Error::bad_request("NOT_A_FOLDER", "This is not a folder"));
+        }
         self.refuse_trash(&folder).await?;
         Ok(folder)
     }
@@ -723,7 +738,8 @@ impl Files {
         if writer.if_match.is_some_and(|etag| file.sha256.as_deref() != Some(etag)) {
             return Err(file_changed());
         }
-        let stored = self.store(user, body, file.size + writer.reserved, writer.sha256).await?;
+        let payer = self.payer(user, file.owner_id).await?;
+        let stored = self.store(&payer, body, file.size + writer.reserved, writer.sha256).await?;
 
         let (old, updated) = match self.put_in_place(user, file, &stored, writer).await {
             Ok(done) => done,
@@ -737,7 +753,7 @@ impl Files {
             // The same bytes again are no new version.
             let changed = old.sha256.as_deref() != Some(stored.sha256.as_str());
             let kept = changed
-                && self.keep_version(user, &old, writer.versioning).await.unwrap_or_else(|err| {
+                && self.keep_version(&payer, &old, writer.versioning).await.unwrap_or_else(|err| {
                     tracing::warn!(file = %old.id, %err, "could not keep the old content as a version");
                     false
                 });
@@ -745,7 +761,7 @@ impl Files {
                 self.discard_blob(old_key).await;
             }
         }
-        self.fit_quota(user).await;
+        self.fit_quota(&payer).await;
         Ok(updated.into())
     }
 

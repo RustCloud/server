@@ -23,7 +23,7 @@ use axum::extract::{FromRef, FromRequestParts, Path, RawQuery, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::engine::general_purpose::STANDARD;
@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 use crate::devices::{check_redirect_uri, AuthorizeRequest, Grant, SessionInfo};
 use crate::external::LinkedLogin;
+use crate::groups::{Group, GroupName};
 use crate::provider::PasswordProvider;
 use crate::service::{AccountUpdate, Auth, NewAccount, NewSession, ProfileUpdate, SessionUser, User};
 
@@ -157,6 +158,10 @@ where
         .route("/api/v1/auth/token", post(token))
         .route("/api/v1/admin/users", get(list_users).post(create_user))
         .route("/api/v1/admin/users/{id}", patch(update_user))
+        .route("/api/v1/admin/groups", get(list_groups).post(create_group))
+        .route("/api/v1/admin/groups/{id}", patch(rename_group).delete(delete_group))
+        .route("/api/v1/admin/groups/{id}/members/{user_id}", put(add_member).delete(remove_member))
+        .route("/api/v1/groups", get(my_groups))
 }
 
 async fn status(State(auth): State<Arc<Auth>>) -> Result<impl IntoResponse> {
@@ -417,6 +422,61 @@ async fn create_user(
 ) -> Result<impl IntoResponse> {
     let user = auth.create_user(request.account, request.is_admin).await?;
     Ok((StatusCode::CREATED, Json(user)))
+}
+
+async fn list_groups(State(auth): State<Arc<Auth>>, _admin: AdminUser) -> Result<Json<Vec<Group>>> {
+    Ok(Json(auth.groups().await?))
+}
+
+#[derive(Deserialize)]
+struct GroupForm {
+    name: String,
+}
+
+async fn create_group(
+    State(auth): State<Arc<Auth>>,
+    _admin: AdminUser,
+    Json(form): Json<GroupForm>,
+) -> Result<(StatusCode, Json<Group>)> {
+    Ok((StatusCode::CREATED, Json(auth.create_group(&form.name).await?)))
+}
+
+async fn rename_group(
+    State(auth): State<Arc<Auth>>,
+    _admin: AdminUser,
+    Path(id): Path<Uuid>,
+    Json(form): Json<GroupForm>,
+) -> Result<StatusCode> {
+    auth.rename_group(id, &form.name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_group(State(auth): State<Arc<Auth>>, _admin: AdminUser, Path(id): Path<Uuid>) -> Result<StatusCode> {
+    auth.delete_group(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn add_member(
+    State(auth): State<Arc<Auth>>,
+    _admin: AdminUser,
+    Path((id, user_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode> {
+    auth.add_member(id, user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remove_member(
+    State(auth): State<Arc<Auth>>,
+    _admin: AdminUser,
+    Path((id, user_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode> {
+    auth.remove_member(id, user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/v1/groups`: the groups the caller is in, to share files with.
+async fn my_groups(State(auth): State<Arc<Auth>>, current: CurrentUser) -> Result<Json<Vec<GroupName>>> {
+    Ok(Json(auth.my_groups(current.user()).await?))
 }
 
 async fn update_user(

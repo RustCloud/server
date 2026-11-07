@@ -10,6 +10,7 @@
   import PluginsPanel from '../components/PluginsPanel.svelte';
   import SystemPanel from '../components/SystemPanel.svelte';
   import AdminUsers from './AdminUsers.svelte';
+  import AdminGroups from './AdminGroups.svelte';
 
   /** `system`, `users` or the name of a settings section. */
   let { tab = 'system' }: { tab?: string } = $props();
@@ -33,6 +34,7 @@
 <nav class="tabs">
   <a href={href('/admin/system')} class:active={tab === 'system'}>{t.serverTab}</a>
   <a href={href('/admin/users')} class:active={tab === 'users'}>{t.users}</a>
+  <a href={href('/admin/groups')} class:active={tab === 'groups'}>{t.groups}</a>
   {#each sections as s (s.name)}
     <a href={href('/admin/' + s.name)} class:active={tab === s.name}>{sectionTitle(s.name)}</a>
   {/each}
@@ -43,6 +45,8 @@
   <SystemPanel />
 {:else if tab === 'users'}
   <AdminUsers />
+{:else if tab === 'groups'}
+  <AdminGroups />
 {:else if section}
   {#if Panel}<Panel />{/if}
   {#key section.name}

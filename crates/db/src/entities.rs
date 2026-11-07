@@ -424,6 +424,66 @@ pub mod app_share_unmatched {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// A group of users the administrator keeps; files are shared with it.
+pub mod group {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "groups")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        #[sea_orm(unique)]
+        pub name: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A user in a group.
+pub mod group_member {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "group_members")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub group_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub user_id: Uuid,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A file or folder shared with a user or a group, for reading or for
+/// changes. One with `username` and neither user nor group names someone
+/// who doesn't exist: it opens nothing (sharing doesn't tell which names exist).
+pub mod file_share {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "file_shares")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub node_id: Uuid,
+        pub owner_id: Uuid,
+        pub user_id: Option<Uuid>,
+        pub group_id: Option<Uuid>,
+        /// The name the owner gave, for a share with nobody.
+        pub username: Option<String>,
+        pub write: bool,
+        pub created_at: DateTimeUtc,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 /// What the administrator set for a plugin. A plugin without a row runs
 /// with the defaults; one installed from the admin page starts disabled.
 pub mod plugin_config {

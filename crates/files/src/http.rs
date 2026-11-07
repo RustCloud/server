@@ -10,7 +10,7 @@ use axum::extract::{FromRef, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use futures_util::TryStreamExt;
@@ -25,6 +25,7 @@ use crate::changes::{ChangePage, ChangeWatch, HINT_EVERY, WATCH_TIME};
 use crate::content;
 use crate::service::{Files, Node, NodeUpdate, Usage};
 use crate::shares::{PublicView, Share, ShareOptions, LINK_COOKIE};
+use crate::sharing::{Access, NewAccess, Received};
 use crate::storage::{SpeedTestResult, StorageReport};
 use crate::uploads::{NewUpload, Upload};
 use crate::versions::Versions;
@@ -42,6 +43,9 @@ where
         .route("/api/v1/files/changes", get(changes))
         .route("/api/v1/files/changes/watch", get(watch_changes))
         .route("/api/v1/files/trash", get(trash).delete(empty_trash))
+        .route("/api/v1/files/shared", get(shared_with_me))
+        .route("/api/v1/files/{id}/access", get(node_access).post(grant_access))
+        .route("/api/v1/access/{id}", patch(change_access).delete(remove_access))
         .route("/api/v1/files/{id}", get(details).patch(update).delete(remove))
         .route("/api/v1/files/{id}/children", get(children))
         .route("/api/v1/files/{id}/folders", post(create_folder))
@@ -406,6 +410,50 @@ async fn next_hint(watch: &mut ChangeWatch) -> Option<Event> {
 
 async fn usage(State(files): State<Arc<Files>>, current: CurrentUser) -> Result<Json<Usage>> {
     Ok(Json(files.usage(current.user()).await?))
+}
+
+async fn shared_with_me(State(files): State<Arc<Files>>, current: CurrentUser) -> Result<Json<Vec<Received>>> {
+    Ok(Json(files.shared_with_me(current.user()).await?))
+}
+
+async fn node_access(
+    State(files): State<Arc<Files>>,
+    current: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<Access>>> {
+    Ok(Json(files.node_access(current.user(), id).await?))
+}
+
+async fn grant_access(
+    State(files): State<Arc<Files>>,
+    current: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(new): Json<NewAccess>,
+) -> Result<(StatusCode, Json<Access>)> {
+    Ok((StatusCode::CREATED, Json(files.grant_access(current.user(), id, new).await?)))
+}
+
+#[derive(Deserialize)]
+struct AccessChange {
+    write: bool,
+}
+
+async fn change_access(
+    State(files): State<Arc<Files>>,
+    current: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(change): Json<AccessChange>,
+) -> Result<Json<Access>> {
+    Ok(Json(files.change_access(current.user(), id, change.write).await?))
+}
+
+async fn remove_access(
+    State(files): State<Arc<Files>>,
+    current: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode> {
+    files.remove_access(current.user(), id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_shares(State(files): State<Arc<Files>>, current: CurrentUser) -> Result<Json<Vec<Share>>> {

@@ -38,7 +38,7 @@ pub struct ZipDownload {
 impl Files {
     /// A folder of the user as a zip archive.
     pub async fn download_zip(self: &Arc<Self>, user: &User, id: Uuid) -> Result<ZipDownload> {
-        let folder = self.accessible(user, id).await?;
+        let folder = self.readable(user, id).await?;
         if self.in_trash(&folder).await? {
             return Err(Error::bad_request("IN_TRASH", "Restore it to download it"));
         }

@@ -43,6 +43,38 @@ export interface Share {
   allow_upload: boolean;
 }
 
+/** A person as shares show them. */
+export interface Person {
+  id: string;
+  username: string;
+  display_name: string;
+}
+
+/** Whom a file or folder is shared with (as its owner sees it). */
+export interface Access {
+  id: string;
+  node_id: string;
+  user: Person | null;
+  group: { id: string; name: string } | null;
+  write: boolean;
+  created_at: string;
+}
+
+/** What someone shared with the user. */
+export interface Received {
+  id: string;
+  node: FileNode;
+  owner: Person;
+  write: boolean;
+  group: { id: string; name: string } | null;
+}
+
+export interface Group {
+  id: string;
+  name: string;
+  members: Person[];
+}
+
 /** Options of a public link; a missing field stays as it is. */
 export interface ShareOptions {
   expires_at?: string | null;
@@ -645,6 +677,20 @@ export const api = {
     if (nodeId) query.set('node', nodeId);
     return request<FileNode>('POST', `/api/v1/public/${enc(token)}/upload?${query}`, file);
   },
+  sharedWithMe: () => request<Received[]>('GET', '/api/v1/files/shared'),
+  nodeAccess: (id: string) => request<Access[]>('GET', `/api/v1/files/${id}/access`),
+  grantAccess: (id: string, to: { username?: string; group_id?: string; write: boolean }) =>
+    request<Access>('POST', `/api/v1/files/${id}/access`, to),
+  changeAccess: (id: string, write: boolean) => request<Access>('PATCH', `/api/v1/access/${id}`, { write }),
+  removeAccess: (id: string) => request<void>('DELETE', `/api/v1/access/${id}`),
+  myGroups: () => request<{ id: string; name: string }[]>('GET', '/api/v1/groups'),
+  groups: () => request<Group[]>('GET', '/api/v1/admin/groups'),
+  createGroup: (name: string) => request<Group>('POST', '/api/v1/admin/groups', { name }),
+  renameGroup: (id: string, name: string) => request<void>('PATCH', `/api/v1/admin/groups/${id}`, { name }),
+  deleteGroup: (id: string) => request<void>('DELETE', `/api/v1/admin/groups/${id}`),
+  addMember: (group: string, user: string) => request<void>('PUT', `/api/v1/admin/groups/${group}/members/${user}`),
+  removeMember: (group: string, user: string) =>
+    request<void>('DELETE', `/api/v1/admin/groups/${group}/members/${user}`),
   deleteShare: (id: string) => request<void>('DELETE', `/api/v1/shares/${id}`),
   publicView: (token: string, nodeId?: string) =>
     request<PublicView>('GET', `/api/v1/public/${enc(token)}${nodeId ? `?node=${nodeId}` : ''}`),

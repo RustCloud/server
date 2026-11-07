@@ -29,6 +29,8 @@
 //! | `oidc_providers` | external login services (OpenID Connect)              |
 //! | `upload_sessions`, `upload_parts` | uploads in parts and the parts received |
 //! | `file_changes` | the change feed of sync clients (ids only, kept 30 days) |
+//! | `groups`, `group_members` | groups of users the administrator keeps    |
+//! | `file_shares` | files and folders shared with users and groups          |
 
 pub mod entities;
 mod migrations;
@@ -36,8 +38,9 @@ mod migrations;
 pub mod testing;
 
 pub use entities::{
-    app_grant, app_password, app_share, app_share_unmatched, file_change, file_lock, file_version, identity, log_entry,
-    node, oidc_provider, plugin_config, plugin_file, plugin_job, session, share, upload_part, upload_session, user,
+    app_grant, app_password, app_share, app_share_unmatched, file_change, file_lock, file_share, file_version, group,
+    group_member, identity, log_entry, node, oidc_provider, plugin_config, plugin_file, plugin_job, session, share,
+    upload_part, upload_session, user,
 };
 pub use sea_orm::DatabaseConnection;
 

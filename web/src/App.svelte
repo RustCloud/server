@@ -15,6 +15,7 @@
   import Connect from './pages/Connect.svelte';
   import Files from './pages/Files.svelte';
   import Links from './pages/Links.svelte';
+  import Shared from './pages/Shared.svelte';
   import Login from './pages/Login.svelte';
   import Public from './pages/Public.svelte';
   import Search from './pages/Search.svelte';
@@ -79,6 +80,8 @@
           <Search query={route.query.get('q') ?? ''} />
         {:else if page === 'links'}
           <Links />
+        {:else if page === 'shared'}
+          <Shared />
         {:else if page === 'settings'}
           <Settings />
         {:else if page === 'connect'}

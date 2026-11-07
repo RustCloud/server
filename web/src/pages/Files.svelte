@@ -18,6 +18,7 @@
   import Icon from '../components/Icon.svelte';
   import Preview from '../components/Preview.svelte';
   import ShareDialog from '../components/ShareDialog.svelte';
+  import PeopleDialog from '../components/PeopleDialog.svelte';
   import VersionsDialog from '../components/VersionsDialog.svelte';
   import UploadPanel, { type UploadItem } from '../components/UploadPanel.svelte';
 
@@ -42,6 +43,7 @@
     | { kind: 'rename'; node: FileNode }
     | { kind: 'move' | 'copy'; nodes: FileNode[] }
     | { kind: 'share'; node: FileNode }
+    | { kind: 'people'; node: FileNode }
     | { kind: 'versions'; node: FileNode }
     | null;
   let dialog = $state<DialogState>(null);
@@ -510,6 +512,16 @@
                   <Icon name="link" />
                   {t.share}
                 </button>
+                <button
+                  type="button"
+                  onclick={(e) => {
+                    closeMenu(e);
+                    dialog = { kind: 'people', node };
+                  }}
+                >
+                  <Icon name="user" />
+                  {t.people}
+                </button>
                 {#if node.lock}
                   {@const lock = node.lock}
                   <button
@@ -632,6 +644,8 @@
   />
 {:else if dialog?.kind === 'share'}
   <ShareDialog node={dialog.node} onclose={() => (dialog = null)} />
+{:else if dialog?.kind === 'people'}
+  <PeopleDialog node={dialog.node} onclose={() => (dialog = null)} />
 {:else if dialog?.kind === 'versions'}
   <VersionsDialog node={dialog.node} onclose={() => (dialog = null)} onrestored={refresh} />
 {/if}

@@ -8,6 +8,7 @@ JSON API под `/api/v1`. Маршруты собирает [server/src/lib.rs]
 | [Аккаунты и вход](auth.md)     | `/auth/*`, `/admin/users`                         |
 | [Файлы](files.md)              | `/files/*` (и [лента изменений](files.md#лента-изменений)), `/usage` |
 | [WebDAV](webdav.md)            | `/dav/` — файлы для ОС и программ (не под `/api/v1`) |
+| [Общий доступ и группы](sharing.md) | `/files/shared`, `/files/{id}/access`, `/access/{id}`, `/groups`, `/admin/groups` |
 | [Публичные ссылки](shares.md)  | `/shares`, `/public/{token}`                      |
 | [Приложения](apps.md)          | `/apps`                                           |
 | [Доступ приложений](grants.md) | `/grants`                                         |

@@ -22,6 +22,7 @@ mod access;
 mod app_passwords;
 mod devices;
 mod external;
+mod groups;
 mod http;
 mod limiter;
 mod provider;
@@ -34,6 +35,7 @@ use service::IP_FAILURE_FACTOR;
 pub use app_passwords::{Access, AppPassword, AppPasswordUser, CreatedAppPassword, NewAppPassword, Scope};
 pub use devices::{check_redirect_uri, AuthorizeRequest, DeviceTokens, SessionInfo, REFRESH_DAYS};
 pub use external::{ExternalLogin, LinkedLogin};
+pub use groups::{Group, GroupName, Member};
 pub use http::{
     basic_credentials, from_a_web_page, router, session_cookie, user_agent, AdminUser, CurrentUser, CSRF_HEADER,
     SESSION_COOKIE,

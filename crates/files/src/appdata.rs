@@ -89,7 +89,7 @@ impl Files {
     /// A file of the user opened for reading, for the media engine
     /// (thumbnails), with what it is.
     pub async fn open_for_media(&self, user: &User, id: Uuid) -> Result<(Node, std::fs::File)> {
-        let file = self.accessible(user, id).await?;
+        let file = self.readable(user, id).await?;
         self.media_file(file).await
     }
 

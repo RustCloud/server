@@ -2914,3 +2914,137 @@ async fn without_the_media_engine_there_are_no_thumbnails() {
     let wrong_size = format!("{uri}x");
     assert_eq!(app.get(&wrong_size, As::Browser(&cookie)).await.status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn folders_are_shared_with_users_and_groups() {
+    let app = TestApp::with_config("[accounts]\nopen_registration = true\n").await;
+    let alice = app.register("alice").await; // the first account: an administrator
+    let bob = app.register("bob").await;
+    let carol = app.register("carol").await;
+    let id_of = |reply: Reply| reply.json()["id"].as_str().unwrap().to_owned();
+    let user_id = |cookie: String| {
+        let app = &app;
+        async move { id_of(app.get("/api/v1/auth/me", As::Browser(&cookie)).await) }
+    };
+    let (alice_id, bob_id, carol_id) =
+        (user_id(alice.clone()).await, user_id(bob.clone()).await, user_id(carol.clone()).await);
+    let root = app.root_id(&alice).await;
+    let mkdir = |parent: String, name: &'static str| {
+        let (app, alice) = (&app, alice.clone());
+        async move {
+            let uri = format!("/api/v1/files/{parent}/folders");
+            id_of(app.json(Method::POST, &uri, As::Browser(&alice), json!({ "name": name })).await)
+        }
+    };
+    let trip = mkdir(root.clone(), "Trip").await;
+    let day = mkdir(trip.clone(), "Day 1").await;
+    let photo = app.upload(&alice, &day, "photo.jpg", "sunset").await;
+    let photo = photo["id"].as_str().unwrap().to_owned();
+
+    // Shared for reading: bob sees it, reads it, but changes nothing.
+    let access = format!("/api/v1/files/{trip}/access");
+    let given = app.json(Method::POST, &access, As::Browser(&alice), json!({ "username": "Bob" })).await;
+    assert_eq!(given.status, StatusCode::CREATED, "{}", given.text());
+    assert_eq!(given.json()["user"]["username"], "bob");
+    let given_id = id_of(given);
+    let shared = app.get("/api/v1/files/shared", As::Browser(&bob)).await.json();
+    assert_eq!(shared[0]["node"]["name"], "Trip");
+    assert_eq!((shared[0]["owner"]["username"].as_str(), shared[0]["write"].as_bool()), (Some("alice"), Some(false)));
+    let details = app.get(&format!("/api/v1/files/{day}"), As::Browser(&bob)).await.json();
+    let path: Vec<&str> = details["path"].as_array().unwrap().iter().map(|n| n["name"].as_str().unwrap()).collect();
+    assert_eq!(path, ["Trip"], "alice's folders above the share stay unseen");
+    assert_eq!(app.get(&format!("/api/v1/files/{photo}/content"), As::Browser(&bob)).await.text(), "sunset");
+    let zip = app.get(&format!("/api/v1/files/{trip}/zip"), As::Browser(&bob)).await;
+    assert_eq!(zip.status, StatusCode::OK);
+    let upload = format!("/api/v1/files/{day}/upload?name=mine.txt");
+    let refused = app.send(Method::POST, &upload, As::Browser(&bob), Body::from("hi"), &[]).await;
+    assert_eq!(refused.json()["error"]["code"], "READ_ONLY_SHARE");
+    assert_eq!(app.get(&format!("/api/v1/files/{trip}"), As::Browser(&carol)).await.status, StatusCode::NOT_FOUND);
+    let not_owner = app.get(&access, As::Browser(&bob)).await;
+    assert_eq!(not_owner.status, StatusCode::NOT_FOUND, "only the owner sees whom it is shared with");
+
+    // For changes: bob's writes are alice's files, in her quota.
+    let uri = format!("/api/v1/access/{given_id}");
+    let changed = app.json(Method::PATCH, &uri, As::Browser(&alice), json!({ "write": true })).await;
+    assert_eq!(changed.json()["write"], true);
+    let added = app.send(Method::POST, &upload, As::Browser(&bob), Body::from("hello"), &[]).await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.text());
+    let added_id = id_of(added);
+    let alice_files = app.get(&format!("/api/v1/files/{day}/children"), As::Browser(&alice)).await.json();
+    assert!(alice_files.as_array().unwrap().iter().any(|n| n["name"] == "mine.txt"));
+    assert_eq!(app.get("/api/v1/usage", As::Browser(&bob)).await.json()["used_bytes"], 0);
+    assert_eq!(app.get("/api/v1/usage", As::Browser(&alice)).await.json()["used_bytes"], 11);
+    let rename = format!("/api/v1/files/{added_id}");
+    let renamed = app.json(Method::PATCH, &rename, As::Browser(&bob), json!({ "name": "notes.txt" })).await;
+    assert_eq!(renamed.json()["name"], "notes.txt");
+    // The shared folder itself is alice's to rename, move or delete.
+    let top = format!("/api/v1/files/{trip}");
+    let rename_top = app.json(Method::PATCH, &top, As::Browser(&bob), json!({ "name": "Mine" })).await;
+    assert_eq!(rename_top.json()["error"]["code"], "SHARED_ROOT");
+    let delete_top = app.send(Method::DELETE, &top, As::Browser(&bob), Body::empty(), &[]).await;
+    assert_eq!(delete_top.json()["error"]["code"], "SHARED_ROOT");
+    // Bob copies a photo out for himself; his own files don't move into alice's.
+    let bob_root = app.root_id(&bob).await;
+    let copy = format!("/api/v1/files/{photo}/copy");
+    let copied = app.json(Method::POST, &copy, As::Browser(&bob), json!({ "parent_id": bob_root })).await;
+    assert_eq!(copied.status, StatusCode::CREATED, "{}", copied.text());
+    let own = app.upload(&bob, &bob_root, "own.txt", "x").await;
+    let move_in = format!("/api/v1/files/{}", own["id"].as_str().unwrap());
+    let moved = app.json(Method::PATCH, &move_in, As::Browser(&bob), json!({ "parent_id": day })).await;
+    assert_eq!(moved.json()["error"]["code"], "CROSS_OWNER_MOVE");
+    // Deleting goes to alice's trash.
+    let deleted = app.send(Method::DELETE, &rename, As::Browser(&bob), Body::empty(), &[]).await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    let trash = app.get("/api/v1/files/trash", As::Browser(&alice)).await.json();
+    let in_trash = format!("/api/v1/files/{}/children", trash["id"].as_str().unwrap());
+    assert_eq!(app.get(&in_trash, As::Browser(&alice)).await.json()[0]["name"], "notes.txt");
+
+    // Groups: the administrator keeps them; alice shares with hers.
+    let group = app.json(Method::POST, "/api/v1/admin/groups", As::Browser(&alice), json!({ "name": "Family" })).await;
+    let group_id = id_of(group);
+    for member in [&alice_id, &carol_id] {
+        let uri = format!("/api/v1/admin/groups/{group_id}/members/{member}");
+        assert_eq!(
+            app.send(Method::PUT, &uri, As::Browser(&alice), Body::empty(), &[]).await.status,
+            StatusCode::NO_CONTENT
+        );
+    }
+    let not_admin = app.json(Method::POST, "/api/v1/admin/groups", As::Browser(&bob), json!({ "name": "X" })).await;
+    assert_eq!(not_admin.status, StatusCode::FORBIDDEN);
+    assert_eq!(app.get("/api/v1/groups", As::Browser(&carol)).await.json()[0]["name"], "Family");
+    assert_eq!(app.get("/api/v1/groups", As::Browser(&bob)).await.json(), json!([]));
+    let by_group = app.json(Method::POST, &access, As::Browser(&alice), json!({ "group_id": group_id })).await;
+    assert_eq!(by_group.json()["group"]["name"], "Family");
+    let carols = app.get("/api/v1/files/shared", As::Browser(&carol)).await.json();
+    assert_eq!(carols[0]["group"]["name"], "Family");
+    let not_in_group = app
+        .json(Method::POST, &format!("/api/v1/files/{day}/access"), As::Browser(&bob), json!({ "group_id": group_id }))
+        .await;
+    assert_eq!(not_in_group.status, StatusCode::NOT_FOUND, "bob shares nothing of alice's");
+    let uri = format!("/api/v1/admin/groups/{group_id}/members/{carol_id}");
+    app.send(Method::DELETE, &uri, As::Browser(&alice), Body::empty(), &[]).await;
+    assert_eq!(app.get(&format!("/api/v1/files/{trip}"), As::Browser(&carol)).await.status, StatusCode::NOT_FOUND);
+
+    // A name nobody has is listed like a person; one's own name is refused.
+    let nobody = app.json(Method::POST, &access, As::Browser(&alice), json!({ "username": "nobody" })).await;
+    assert_eq!(nobody.status, StatusCode::CREATED);
+    let listed = app.get(&access, As::Browser(&alice)).await.json();
+    assert_eq!(listed.as_array().unwrap().len(), 3);
+    let own_name = app.json(Method::POST, &access, As::Browser(&alice), json!({ "username": "alice" })).await;
+    assert_eq!(own_name.json()["error"]["code"], "SHARE_WITH_SELF");
+    let root_share = app
+        .json(Method::POST, &format!("/api/v1/files/{root}/access"), As::Browser(&alice), json!({ "username": "bob" }))
+        .await;
+    assert_eq!(root_share.json()["error"]["code"], "ROOT_FOLDER");
+
+    // Bob gives it up.
+    let left =
+        app.send(Method::DELETE, &format!("/api/v1/access/{given_id}"), As::Browser(&bob), Body::empty(), &[]).await;
+    assert_eq!(left.status, StatusCode::NO_CONTENT);
+    assert_eq!(app.get("/api/v1/files/shared", As::Browser(&bob)).await.json(), json!([]));
+    assert_eq!(
+        app.get(&format!("/api/v1/files/{photo}/content"), As::Browser(&bob)).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let _ = bob_id;
+}

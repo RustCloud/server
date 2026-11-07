@@ -29,6 +29,7 @@ impl MigratorTrait for Migrator {
             Box::new(UploadSessions),
             Box::new(UnmatchedAppShares),
             Box::new(ShareOptions),
+            Box::new(Groups),
         ]
     }
 }
@@ -722,6 +723,67 @@ impl MigrationTrait for ShareOptions {
         manager.alter_table(Table::alter().table("shares").add_column(string_null("password_hash")).to_owned()).await?;
         let allow_upload = boolean("allow_upload").default(false).to_owned();
         manager.alter_table(Table::alter().table("shares").add_column(allow_upload).to_owned()).await
+    }
+}
+
+/// Groups of users the administrator keeps (`groups`, `group_members`),
+/// and files and folders shared with users or groups (`file_shares`).
+struct Groups;
+
+impl MigrationName for Groups {
+    fn name(&self) -> &str {
+        "m0020_groups_and_file_shares"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Groups {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table("groups")
+                    .col(pk_uuid("id"))
+                    .col(string_uniq("name"))
+                    .col(timestamp_with_time_zone("created_at"))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table("group_members")
+                    .col(uuid("group_id"))
+                    .col(uuid("user_id"))
+                    .primary_key(Index::create().col("group_id").col("user_id"))
+                    .foreign_key(&mut cascade_fk("group_members", "group_id", "groups"))
+                    .foreign_key(&mut cascade_fk("group_members", "user_id", "users"))
+                    .to_owned(),
+            )
+            .await?;
+        create_index(manager, "group_members", &["user_id"], false).await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table("file_shares")
+                    .col(pk_uuid("id"))
+                    .col(uuid("node_id"))
+                    .col(uuid("owner_id"))
+                    .col(uuid_null("user_id"))
+                    .col(uuid_null("group_id"))
+                    .col(string_null("username"))
+                    .col(boolean("write"))
+                    .col(timestamp_with_time_zone("created_at"))
+                    .foreign_key(&mut cascade_fk("file_shares", "node_id", "nodes"))
+                    .foreign_key(&mut cascade_fk("file_shares", "owner_id", "users"))
+                    .foreign_key(&mut cascade_fk("file_shares", "user_id", "users"))
+                    .foreign_key(&mut cascade_fk("file_shares", "group_id", "groups"))
+                    .to_owned(),
+            )
+            .await?;
+        create_index(manager, "file_shares", &["node_id"], false).await?;
+        create_index(manager, "file_shares", &["user_id"], false).await?;
+        create_index(manager, "file_shares", &["group_id"], false).await
     }
 }
 
