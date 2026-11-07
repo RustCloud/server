@@ -42,7 +42,7 @@
   {#if current && list}
     <ul>
       <li>
-        <span>{formatDate(current.updated_at, locale)}</span>
+        <span>{formatDate(current.modified_at, locale)}</span>
         <span class="muted small">{formatBytes(current.size)}</span>
         <span class="current muted small">{t.currentVersion}</span>
       </li>

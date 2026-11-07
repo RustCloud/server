@@ -198,6 +198,7 @@ fn node(row: plugin_file::Model) -> rustcloud_files::Node {
         etag: Some(row.sha256),
         created_at: row.updated_at,
         updated_at: row.updated_at,
+        modified_at: row.updated_at,
         trashed_at: None,
         lock: None,
     }

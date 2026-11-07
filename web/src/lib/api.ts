@@ -23,7 +23,10 @@ export interface FileNode {
   mime_type: string | null;
   etag: string | null;
   created_at: string;
+  /** When the server last changed it: content, name or place. */
   updated_at: string;
+  /** When its content was changed, as the uploader said (the file's mtime). */
+  modified_at: string;
   /** When it went to the trash; only for what is in it. */
   trashed_at?: string;
   /** The lock an app holds while editing it: only that app changes it meanwhile. */
@@ -672,7 +675,11 @@ export function uploadFile(
 ): Upload {
   const xhr = new XMLHttpRequest();
   const done = new Promise<FileNode>((resolve, reject) => {
-    const query = `name=${enc(file.name)}${overwrite ? '&overwrite=true' : ''}`;
+    let query = `name=${enc(file.name)}${overwrite ? '&overwrite=true' : ''}`;
+    // The file keeps its time — unless the computer's clock says something odd.
+    if (file.lastModified > 0 && file.lastModified < Date.now() + 12 * 3600_000) {
+      query += `&mtime=${file.lastModified / 1000}`;
+    }
     xhr.open('POST', `/api/v1/files/${folderId}/upload?${query}`);
     xhr.setRequestHeader('X-Requested-With', 'rustcloud');
     xhr.upload.onprogress = (event) => {

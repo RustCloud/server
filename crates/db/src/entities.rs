@@ -109,6 +109,9 @@ pub mod node {
         /// Who wrote the current content; `None` for folders and for files
         /// written before versions existed.
         pub modified_by: Option<Uuid>,
+        /// When the content was last changed as the client that wrote it
+        /// says (the file's mtime); `None`: the same as `updated_at`.
+        pub modified_at: Option<DateTimeUtc>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}

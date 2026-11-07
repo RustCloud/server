@@ -121,7 +121,9 @@ impl Files {
         let version = self.version_row(file.id, version_id).await?;
         let body = self.blobs.get(&version.content_key, None).await?;
         let name = file.name.clone();
-        let writer = Writer { versioning: Versioning::Always, ..Writer::user() };
+        // The content comes back with the time it had.
+        let mtime = Some(version.modified_at);
+        let writer = Writer { versioning: Versioning::Always, mtime, ..Writer::user() };
         let restored = self.write_content(user, file, body, writer).await?;
         self.emit_for(FileEventKind::Changed, restored.id, None).await;
         audit!("file.version.restore", name, size = restored.size, "version restored");
@@ -174,7 +176,7 @@ impl Files {
             content_key: Set(key.clone()),
             sha256: Set(sha256.clone()),
             modified_by: Set(file.modified_by),
-            modified_at: Set(file.updated_at),
+            modified_at: Set(file.modified_at.unwrap_or(file.updated_at)),
             created_at: Set(Utc::now()),
         }
         .insert(&self.db)
@@ -323,5 +325,11 @@ impl Files {
 
 /// `file` with the size, ETag and time of `version`.
 fn as_of(file: node::Model, version: &file_version::Model) -> node::Model {
-    node::Model { size: version.size, sha256: Some(version.sha256.clone()), updated_at: version.modified_at, ..file }
+    node::Model {
+        size: version.size,
+        sha256: Some(version.sha256.clone()),
+        updated_at: version.modified_at,
+        modified_at: Some(version.modified_at),
+        ..file
+    }
 }

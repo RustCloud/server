@@ -3,7 +3,7 @@ import type { FileNode } from './api';
 import { previewKind } from './preview';
 
 function file(name: string, mime_type: string | null, is_dir = false): FileNode {
-  return { id: '1', parent_id: null, name, is_dir, size: 1, mime_type, etag: null, created_at: '', updated_at: '' };
+  return { id: '1', parent_id: null, name, is_dir, size: 1, mime_type, etag: null, created_at: '', updated_at: '', modified_at: '' };
 }
 
 describe('previewKind', () => {

@@ -1,6 +1,6 @@
 //! What happens to users' files, for whoever watches: background jobs of
 //! plugins start from here (`file.created`, `file.changed`, `file.deleted`,
-//! `file.moved`). Only changes through the API, WebDAV and apps count;
+//! `file.moved`). Only changes through the API and apps count;
 //! AppData has none.
 //!
 //! An event names the apps that watch each of its files — those the owner

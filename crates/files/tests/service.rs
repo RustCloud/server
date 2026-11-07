@@ -78,9 +78,9 @@ async fn root_folder_is_created_once() {
 async fn folders_are_listed_before_files_and_sorted_by_name() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    s.files.upload(&s.alice, root.id, "b.txt", body("b"), false).await.unwrap();
+    s.files.upload(&s.alice, root.id, "b.txt", body("b"), false, None).await.unwrap();
     s.files.create_folder(&s.alice, root.id, "Zebra").await.unwrap();
-    s.files.upload(&s.alice, root.id, "A.txt", body("a"), false).await.unwrap();
+    s.files.upload(&s.alice, root.id, "A.txt", body("a"), false, None).await.unwrap();
     s.files.create_folder(&s.alice, root.id, "apple").await.unwrap();
 
     let names: Vec<String> = s.files.children(&s.alice, root.id).await.unwrap().into_iter().map(|n| n.name).collect();
@@ -94,7 +94,7 @@ async fn duplicate_names_are_rejected() {
     s.files.create_folder(&s.alice, root.id, "Docs").await.unwrap();
     let err = s.files.create_folder(&s.alice, root.id, "Docs").await.unwrap_err();
     assert_eq!(err.code, "NAME_TAKEN");
-    let err = s.files.upload(&s.alice, root.id, "Docs", body("x"), true).await.unwrap_err();
+    let err = s.files.upload(&s.alice, root.id, "Docs", body("x"), true, None).await.unwrap_err();
     assert_eq!(err.code, "NAME_TAKEN", "a folder is never overwritten by a file");
 }
 
@@ -102,7 +102,7 @@ async fn duplicate_names_are_rejected() {
 async fn uploaded_content_can_be_downloaded() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "hello.txt", body("hello world"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "hello.txt", body("hello world"), false, None).await.unwrap();
 
     assert_eq!(file.size, 11);
     assert_eq!(file.mime_type.as_deref(), Some("text/plain"));
@@ -121,12 +121,12 @@ async fn uploaded_content_can_be_downloaded() {
 async fn overwriting_needs_permission_and_replaces_the_blob() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let first = s.files.upload(&s.alice, root.id, "notes.txt", body("v1"), false).await.unwrap();
+    let first = s.files.upload(&s.alice, root.id, "notes.txt", body("v1"), false, None).await.unwrap();
 
-    let err = s.files.upload(&s.alice, root.id, "notes.txt", body("v2"), false).await.unwrap_err();
+    let err = s.files.upload(&s.alice, root.id, "notes.txt", body("v2"), false, None).await.unwrap_err();
     assert_eq!(err.code, "NAME_TAKEN");
 
-    let second = s.files.upload(&s.alice, root.id, "notes.txt", body("v2!"), true).await.unwrap();
+    let second = s.files.upload(&s.alice, root.id, "notes.txt", body("v2!"), true, None).await.unwrap();
     assert_eq!(second.id, first.id, "the same file is updated");
     assert_ne!(second.etag, first.etag);
     assert_eq!(read(s.files.download(&s.alice, first.id, None).await.unwrap()).await, "v2!");
@@ -137,13 +137,13 @@ async fn overwriting_needs_permission_and_replaces_the_blob() {
 async fn other_users_cannot_see_or_touch_files() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "secret.txt", body("secret"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "secret.txt", body("secret"), false, None).await.unwrap();
 
     assert_eq!(s.files.get(&s.bob, file.id).await.unwrap_err().code, "FILE_NOT_FOUND");
     assert!(s.files.download(&s.bob, file.id, None).await.is_err());
     assert!(s.files.children(&s.bob, root.id).await.is_err());
     assert!(s.files.delete(&s.bob, file.id).await.is_err());
-    assert!(s.files.upload(&s.bob, root.id, "x.txt", body("x"), false).await.is_err());
+    assert!(s.files.upload(&s.bob, root.id, "x.txt", body("x"), false, None).await.is_err());
     let bob_root = s.files.root(&s.bob).await.unwrap();
     assert!(s.files.copy(&s.bob, file.id, bob_root.id, None).await.is_err());
 }
@@ -153,9 +153,9 @@ async fn rename_and_move() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
     let docs = s.files.create_folder(&s.alice, root.id, "Docs").await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false, None).await.unwrap();
 
-    let update = NodeUpdate { name: Some("b.txt".into()), parent_id: Some(docs.id) };
+    let update = NodeUpdate { name: Some("b.txt".into()), parent_id: Some(docs.id), ..Default::default() };
     let moved = s.files.update(&s.alice, file.id, update).await.unwrap();
     assert_eq!(moved.name, "b.txt");
     assert_eq!(moved.parent_id, Some(docs.id));
@@ -172,7 +172,7 @@ async fn folders_cannot_be_moved_into_themselves() {
     let b = s.files.create_folder(&s.alice, a.id, "B").await.unwrap();
 
     for target in [a.id, b.id] {
-        let update = NodeUpdate { name: None, parent_id: Some(target) };
+        let update = NodeUpdate { name: None, parent_id: Some(target), ..Default::default() };
         let err = s.files.update(&s.alice, a.id, update).await.unwrap_err();
         assert_eq!(err.code, "MOVE_INTO_ITSELF");
     }
@@ -186,8 +186,8 @@ async fn two_folders_moved_into_each_other_at_once_make_no_loop() {
         let a = s.files.create_folder(&s.alice, root.id, &format!("A{round}")).await.unwrap();
         let b = s.files.create_folder(&s.alice, root.id, &format!("B{round}")).await.unwrap();
         let (into_b, into_a) = tokio::join!(
-            s.files.update(&s.alice, a.id, NodeUpdate { name: None, parent_id: Some(b.id) }),
-            s.files.update(&s.alice, b.id, NodeUpdate { name: None, parent_id: Some(a.id) }),
+            s.files.update(&s.alice, a.id, NodeUpdate { name: None, parent_id: Some(b.id), ..Default::default() }),
+            s.files.update(&s.alice, b.id, NodeUpdate { name: None, parent_id: Some(a.id), ..Default::default() }),
         );
         assert!(into_b.is_ok() != into_a.is_ok(), "exactly one of the moves wins");
         let lost = into_b.err().or(into_a.err()).unwrap();
@@ -216,7 +216,7 @@ async fn a_loop_already_in_the_tree_fails_instead_of_hanging() {
 async fn root_cannot_be_renamed_deleted_or_shared() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let rename = NodeUpdate { name: Some("x".into()), parent_id: None };
+    let rename = NodeUpdate { name: Some("x".into()), parent_id: None, ..Default::default() };
     assert_eq!(s.files.update(&s.alice, root.id, rename).await.unwrap_err().code, "ROOT_FOLDER");
     assert_eq!(s.files.delete(&s.alice, root.id).await.unwrap_err().code, "ROOT_FOLDER");
     assert_eq!(s.files.create_share(&s.alice, root.id, None).await.unwrap_err().code, "ROOT_FOLDER");
@@ -228,7 +228,7 @@ async fn copying_a_folder_copies_everything_inside() {
     let root = s.files.root(&s.alice).await.unwrap();
     let docs = s.files.create_folder(&s.alice, root.id, "Docs").await.unwrap();
     let sub = s.files.create_folder(&s.alice, docs.id, "Sub").await.unwrap();
-    s.files.upload(&s.alice, sub.id, "deep.txt", body("deep"), false).await.unwrap();
+    s.files.upload(&s.alice, sub.id, "deep.txt", body("deep"), false, None).await.unwrap();
 
     let copy = s.files.copy(&s.alice, docs.id, root.id, Some("Docs copy")).await.unwrap();
     let copied_sub = &s.files.children(&s.alice, copy.id).await.unwrap()[0];
@@ -247,8 +247,8 @@ async fn deleting_a_folder_removes_all_content() {
     let root = s.files.root(&s.alice).await.unwrap();
     let docs = s.files.create_folder(&s.alice, root.id, "Docs").await.unwrap();
     let sub = s.files.create_folder(&s.alice, docs.id, "Sub").await.unwrap();
-    let file = s.files.upload(&s.alice, sub.id, "a.txt", body("a"), false).await.unwrap();
-    s.files.upload(&s.alice, docs.id, "b.txt", body("b"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, sub.id, "a.txt", body("a"), false, None).await.unwrap();
+    s.files.upload(&s.alice, docs.id, "b.txt", body("b"), false, None).await.unwrap();
 
     s.files.delete(&s.alice, docs.id).await.unwrap();
     let trash = s.files.trash(&s.alice).await.unwrap();
@@ -267,14 +267,14 @@ async fn the_trash_keeps_what_was_deleted_until_restored_or_deleted_again() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
     let docs = s.files.create_folder(&s.alice, root.id, "Docs").await.unwrap();
-    let report = s.files.upload(&s.alice, docs.id, "report.pdf", body("1"), false).await.unwrap();
+    let report = s.files.upload(&s.alice, docs.id, "report.pdf", body("1"), false, None).await.unwrap();
     let share = s.files.create_share(&s.alice, report.id, None).await.unwrap();
 
     s.files.delete(&s.alice, report.id).await.unwrap();
     assert!(s.files.search(&s.alice, "report").await.unwrap().is_empty(), "search leaves the trash out");
     assert!(s.files.public_view(&share.token, None).await.is_err(), "links stop working");
     // Another file of the same name deleted: both stay.
-    let again = s.files.upload(&s.alice, docs.id, "report.pdf", body("2"), false).await.unwrap();
+    let again = s.files.upload(&s.alice, docs.id, "report.pdf", body("2"), false, None).await.unwrap();
     s.files.delete(&s.alice, again.id).await.unwrap();
     let trash = s.files.trash(&s.alice).await.unwrap();
     let mut names: Vec<String> =
@@ -283,9 +283,12 @@ async fn the_trash_keeps_what_was_deleted_until_restored_or_deleted_again() {
     assert_eq!(names, ["report (2).pdf", "report.pdf"]);
 
     // Nothing gets in but by deleting, and the trash itself stays.
-    let put = s.files.upload(&s.alice, trash.id, "x.txt", body("x"), false).await.unwrap_err();
+    let put = s.files.upload(&s.alice, trash.id, "x.txt", body("x"), false, None).await.unwrap_err();
     assert_eq!(put.code, "IN_TRASH");
-    let moved = s.files.update(&s.alice, docs.id, NodeUpdate { name: None, parent_id: Some(trash.id) }).await;
+    let moved = s
+        .files
+        .update(&s.alice, docs.id, NodeUpdate { name: None, parent_id: Some(trash.id), ..Default::default() })
+        .await;
     assert_eq!(moved.unwrap_err().code, "IN_TRASH");
     assert_eq!(s.files.delete(&s.alice, trash.id).await.unwrap_err().code, "TRASH_FOLDER");
 
@@ -295,7 +298,7 @@ async fn the_trash_keeps_what_was_deleted_until_restored_or_deleted_again() {
     assert!(restored.trashed_at.is_none());
     assert!(s.files.public_view(&share.token, None).await.is_ok(), "and its links work again");
     s.files.delete(&s.alice, report.id).await.unwrap();
-    s.files.upload(&s.alice, docs.id, "report.pdf", body("3"), false).await.unwrap();
+    s.files.upload(&s.alice, docs.id, "report.pdf", body("3"), false, None).await.unwrap();
     assert_eq!(s.files.restore(&s.alice, report.id).await.unwrap().name, "report (2).pdf");
     assert_eq!(s.files.restore(&s.alice, report.id).await.unwrap_err().code, "NOT_IN_TRASH");
 
@@ -314,7 +317,7 @@ async fn the_trash_keeps_what_was_deleted_until_restored_or_deleted_again() {
 async fn old_things_leave_the_trash() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "old.txt", body("x"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "old.txt", body("x"), false, None).await.unwrap();
     s.files.delete(&s.alice, file.id).await.unwrap();
 
     let before = chrono::Utc::now() - chrono::Duration::days(1);
@@ -331,14 +334,14 @@ async fn quota_is_enforced_while_uploading() {
     s.alice.quota_bytes = Some(10);
     let root = s.files.root(&s.alice).await.unwrap();
 
-    let file = s.files.upload(&s.alice, root.id, "a.txt", body("123456"), false).await.unwrap();
-    let err = s.files.upload(&s.alice, root.id, "b.txt", body("123456"), false).await.unwrap_err();
+    let file = s.files.upload(&s.alice, root.id, "a.txt", body("123456"), false, None).await.unwrap();
+    let err = s.files.upload(&s.alice, root.id, "b.txt", body("123456"), false, None).await.unwrap_err();
     assert_eq!(err.code, "QUOTA_EXCEEDED");
     assert_eq!(s.files.children(&s.alice, root.id).await.unwrap().len(), 1, "nothing half-uploaded is kept");
     assert_eq!(blob_count(s.blob_dir.path()), 1);
 
     // Replacing a file only needs room for the difference.
-    s.files.replace_content(&s.alice, file.id, body("1234567890"), None).await.unwrap();
+    s.files.replace_content(&s.alice, file.id, body("1234567890"), None, None).await.unwrap();
 
     let usage = s.files.usage(&s.alice).await.unwrap();
     assert_eq!(usage.used_bytes, 10);
@@ -354,12 +357,12 @@ async fn upload_size_limit_applies_as_soon_as_it_is_changed() {
     let root = s.files.root(&s.alice).await.unwrap();
     let mib = |n: usize| -> ByteStream { Box::pin(stream::once(async move { Ok(Bytes::from(vec![0u8; n])) })) };
 
-    s.files.upload(&s.alice, root.id, "big.bin", mib(1024 * 1024 + 1), false).await.unwrap();
+    s.files.upload(&s.alice, root.id, "big.bin", mib(1024 * 1024 + 1), false, None).await.unwrap();
 
     s.settings.set(FilesSettings { max_upload_mib: Some(1), ..Default::default() });
-    let err = s.files.upload(&s.alice, root.id, "too-big.bin", mib(1024 * 1024 + 1), false).await.unwrap_err();
+    let err = s.files.upload(&s.alice, root.id, "too-big.bin", mib(1024 * 1024 + 1), false, None).await.unwrap_err();
     assert_eq!(err.code, "FILE_TOO_LARGE");
-    s.files.upload(&s.alice, root.id, "fits.bin", mib(1024 * 1024), false).await.unwrap();
+    s.files.upload(&s.alice, root.id, "fits.bin", mib(1024 * 1024), false, None).await.unwrap();
     assert_eq!(blob_count(s.blob_dir.path()), 2, "the rejected upload left nothing behind");
 }
 
@@ -368,10 +371,10 @@ async fn search_is_case_insensitive_and_treats_wildcards_literally() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
     for name in ["Report 2024.pdf", "report_final.doc", "100% done.txt", "other.txt"] {
-        s.files.upload(&s.alice, root.id, name, body("x"), false).await.unwrap();
+        s.files.upload(&s.alice, root.id, name, body("x"), false, None).await.unwrap();
     }
     let bob_root = s.files.root(&s.bob).await.unwrap();
-    s.files.upload(&s.bob, bob_root.id, "report-bob.txt", body("x"), false).await.unwrap();
+    s.files.upload(&s.bob, bob_root.id, "report-bob.txt", body("x"), false, None).await.unwrap();
 
     let names = |found: Vec<rustcloud_files::Node>| found.into_iter().map(|n| n.name).collect::<Vec<_>>();
     assert_eq!(names(s.files.search(&s.alice, "REPORT").await.unwrap()), ["Report 2024.pdf", "report_final.doc"]);
@@ -386,8 +389,8 @@ async fn public_link_gives_read_access_to_a_folder_and_nothing_else() {
     let root = s.files.root(&s.alice).await.unwrap();
     let shared = s.files.create_folder(&s.alice, root.id, "Shared").await.unwrap();
     let sub = s.files.create_folder(&s.alice, shared.id, "Sub").await.unwrap();
-    let inside = s.files.upload(&s.alice, sub.id, "in.txt", body("inside"), false).await.unwrap();
-    let outside = s.files.upload(&s.alice, root.id, "out.txt", body("outside"), false).await.unwrap();
+    let inside = s.files.upload(&s.alice, sub.id, "in.txt", body("inside"), false, None).await.unwrap();
+    let outside = s.files.upload(&s.alice, root.id, "out.txt", body("outside"), false, None).await.unwrap();
 
     let link = s.files.create_share(&s.alice, shared.id, None).await.unwrap();
     assert_eq!(s.files.shares(&s.alice).await.unwrap()[0].node.id, shared.id);
@@ -411,7 +414,7 @@ async fn public_link_gives_read_access_to_a_folder_and_nothing_else() {
 async fn links_of_a_disabled_account_stop_working() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false, None).await.unwrap();
     let link = s.files.create_share(&s.alice, file.id, None).await.unwrap();
     assert!(s.files.public_view(&link.token, None).await.is_ok());
 
@@ -426,7 +429,7 @@ async fn links_of_a_disabled_account_stop_working() {
 async fn expired_links_stop_working() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false, None).await.unwrap();
 
     let past = chrono::Utc::now() - chrono::Duration::minutes(1);
     assert_eq!(s.files.create_share(&s.alice, file.id, Some(past)).await.unwrap_err().code, "INVALID_EXPIRY");
@@ -446,7 +449,7 @@ async fn expired_links_stop_working() {
 async fn only_the_owner_can_delete_a_link() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false, None).await.unwrap();
     let link = s.files.create_share(&s.alice, file.id, None).await.unwrap();
 
     assert_eq!(s.files.delete_share(&s.bob, link.id).await.unwrap_err().code, "SHARE_NOT_FOUND");
@@ -458,8 +461,8 @@ async fn storage_report_counts_all_files_and_keeps_the_last_speed_test() {
     let s = setup().await;
     let alice_root = s.files.root(&s.alice).await.unwrap();
     let bob_root = s.files.root(&s.bob).await.unwrap();
-    s.files.upload(&s.alice, alice_root.id, "a.txt", body("12345"), false).await.unwrap();
-    s.files.upload(&s.bob, bob_root.id, "b.txt", body("123"), false).await.unwrap();
+    s.files.upload(&s.alice, alice_root.id, "a.txt", body("12345"), false, None).await.unwrap();
+    s.files.upload(&s.bob, bob_root.id, "b.txt", body("123"), false, None).await.unwrap();
     s.files.create_folder(&s.bob, bob_root.id, "folder").await.unwrap();
 
     let report = s.files.storage_report().await.unwrap();
@@ -492,7 +495,7 @@ async fn age(s: &Setup, id: uuid::Uuid, hours: i64) {
 /// Replaces the content a while after the latest save, so it makes a version.
 async fn save_later(s: &Setup, id: uuid::Uuid, text: &'static str) {
     age(s, id, 1).await;
-    s.files.replace_content(&s.alice, id, body(text), None).await.unwrap();
+    s.files.replace_content(&s.alice, id, body(text), None, None).await.unwrap();
 }
 
 async fn version_texts(s: &Setup, id: uuid::Uuid) -> Vec<String> {
@@ -507,13 +510,13 @@ async fn version_texts(s: &Setup, id: uuid::Uuid) -> Vec<String> {
 async fn replacing_a_file_keeps_the_old_content_as_a_version() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "plan.txt", body("v1"), false).await.unwrap();
-    s.files.replace_content(&s.alice, file.id, body("v2"), None).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "plan.txt", body("v1"), false, None).await.unwrap();
+    s.files.replace_content(&s.alice, file.id, body("v2"), None, None).await.unwrap();
     assert!(version_texts(&s, file.id).await.is_empty(), "saved right after creating it: one change");
 
     save_later(&s, file.id, "v3").await;
-    s.files.replace_content(&s.alice, file.id, body("v4"), None).await.unwrap();
-    s.files.replace_content(&s.alice, file.id, body("v4"), None).await.unwrap();
+    s.files.replace_content(&s.alice, file.id, body("v4"), None, None).await.unwrap();
+    s.files.replace_content(&s.alice, file.id, body("v4"), None, None).await.unwrap();
     assert_eq!(version_texts(&s, file.id).await, ["v2"], "saves close together and the same bytes add none");
 
     save_later(&s, file.id, "v5").await;
@@ -540,10 +543,51 @@ async fn replacing_a_file_keeps_the_old_content_as_a_version() {
 }
 
 #[tokio::test]
+async fn files_keep_the_mtime_their_client_gave() {
+    let s = setup().await;
+    let root = s.files.root(&s.alice).await.unwrap();
+    let at = |text: &str| chrono::DateTime::parse_from_rfc3339(text).unwrap().to_utc();
+    let (t1, t2) = (at("2024-01-02T03:04:05.123456Z"), at("2025-06-07T08:09:10Z"));
+
+    let file = s.files.upload(&s.alice, root.id, "a.txt", body("v1"), false, Some(t1)).await.unwrap();
+    assert_eq!(file.modified_at, t1);
+    let renamed = NodeUpdate { name: Some("b.txt".into()), ..Default::default() };
+    assert_eq!(s.files.update(&s.alice, file.id, renamed).await.unwrap().modified_at, t1, "renaming keeps it");
+    let copy = s.files.copy(&s.alice, file.id, root.id, Some("c.txt")).await.unwrap();
+    assert_eq!(copy.modified_at, t1, "so does copying");
+
+    // Without one, the time of the upload.
+    age(&s, file.id, 1).await;
+    let v2 = s.files.replace_content(&s.alice, file.id, body("v2"), None, None).await.unwrap();
+    assert_eq!(v2.modified_at, v2.updated_at);
+    let touched = NodeUpdate { modified_at: Some(t2), ..Default::default() };
+    assert_eq!(s.files.update(&s.alice, file.id, touched).await.unwrap().modified_at, t2);
+
+    // A restored version comes back with its time.
+    let versions = s.files.versions(&s.alice, file.id).await.unwrap().versions;
+    assert_eq!(versions[0].modified_at, t1);
+    let restored = s.files.restore_version(&s.alice, file.id, versions[0].id).await.unwrap();
+    assert_eq!(restored.modified_at, t1);
+    assert_eq!(s.files.versions(&s.alice, file.id).await.unwrap().versions[0].modified_at, t2);
+
+    let future = chrono::Utc::now() + chrono::Duration::days(2);
+    let refused = s.files.upload(&s.alice, root.id, "d.txt", body("x"), false, Some(future)).await;
+    assert_eq!(code_of(refused), "INVALID_MTIME");
+    let before_1970 = at("1969-12-31T23:59:59Z");
+    assert_eq!(
+        code_of(s.files.replace_content(&s.alice, file.id, body("x"), None, Some(before_1970)).await),
+        "INVALID_MTIME"
+    );
+    let folder = s.files.create_folder(&s.alice, root.id, "Docs").await.unwrap();
+    let touched = NodeUpdate { modified_at: Some(t1), ..Default::default() };
+    assert_eq!(code_of(s.files.update(&s.alice, folder.id, touched).await), "NOT_A_FILE");
+}
+
+#[tokio::test]
 async fn a_version_stays_while_it_is_one_of_the_latest_or_recent_enough() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "a.txt", body("1"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "a.txt", body("1"), false, None).await.unwrap();
     for text in ["2", "3", "4", "5"] {
         save_later(&s, file.id, text).await;
     }
@@ -578,19 +622,19 @@ async fn versions_give_way_when_files_need_the_room() {
     let mut s = setup().await;
     s.alice.quota_bytes = Some(20);
     let root = s.files.root(&s.alice).await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "a.txt", body("123456"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "a.txt", body("123456"), false, None).await.unwrap();
     save_later(&s, file.id, "12345678").await;
     let usage = s.files.usage(&s.alice).await.unwrap();
     assert_eq!((usage.used_bytes, usage.versions_bytes), (14, 6), "versions count in the quota");
 
     // 8 + 10 fit into 20 once the version goes.
-    s.files.upload(&s.alice, root.id, "b.txt", body("1234567890"), false).await.unwrap();
+    s.files.upload(&s.alice, root.id, "b.txt", body("1234567890"), false, None).await.unwrap();
     let usage = s.files.usage(&s.alice).await.unwrap();
     assert_eq!((usage.used_bytes, usage.versions_bytes), (18, 0));
     assert!(version_texts(&s, file.id).await.is_empty());
 
     // Files themselves still can't go over it.
-    let err = s.files.upload(&s.alice, root.id, "c.txt", body("123"), false).await.unwrap_err();
+    let err = s.files.upload(&s.alice, root.id, "c.txt", body("123"), false, None).await.unwrap_err();
     assert_eq!(err.code, "QUOTA_EXCEEDED");
 }
 
@@ -619,9 +663,9 @@ async fn events_name_the_apps_that_watched_the_files_before_they_were_deleted() 
     let photos = s.files.create_folder(&s.alice, root.id, "Photos").await.unwrap();
     let trip = s.files.create_folder(&s.alice, photos.id, "Trip").await.unwrap();
     let hidden = s.files.create_folder(&s.alice, photos.id, ".thumbs").await.unwrap();
-    let cat = s.files.upload(&s.alice, photos.id, "cat.jpg", body("cat"), false).await.unwrap();
-    let sea = s.files.upload(&s.alice, trip.id, "sea.jpg", body("sea"), false).await.unwrap();
-    s.files.upload(&s.alice, hidden.id, "cat.webp", body("small"), false).await.unwrap();
+    let cat = s.files.upload(&s.alice, photos.id, "cat.jpg", body("cat"), false, None).await.unwrap();
+    let sea = s.files.upload(&s.alice, trip.id, "sea.jpg", body("sea"), false, None).await.unwrap();
+    s.files.upload(&s.alice, hidden.id, "cat.webp", body("small"), false, None).await.unwrap();
     let grant = |app: &str, node_id| NewGrant { app_id: app.into(), node_id, write: false, kind: GrantKind::Standing };
     let folders = permissions(FileScope::Folder, false);
     s.files.create_grant(&s.alice, grant("photos", photos.id), &folders).await.unwrap();
@@ -657,15 +701,15 @@ async fn moving_tells_the_apps_of_both_places_and_nobody_watching_means_no_event
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
     let photos = s.files.create_folder(&s.alice, root.id, "Photos").await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "cat.jpg", body("cat"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "cat.jpg", body("cat"), false, None).await.unwrap();
     let mut events = s.files.subscribe();
-    let rename = NodeUpdate { name: Some("kitten.jpg".into()), parent_id: None };
+    let rename = NodeUpdate { name: Some("kitten.jpg".into()), parent_id: None, ..Default::default() };
     s.files.update(&s.alice, file.id, rename).await.unwrap();
     assert!(events.try_recv().is_err(), "no app watches it");
 
     let folders = permissions(FileScope::Folder, false);
     s.files.create_grant(&s.alice, new_grant(photos.id, GrantKind::Standing, false), &folders).await.unwrap();
-    let into = NodeUpdate { name: None, parent_id: Some(photos.id) };
+    let into = NodeUpdate { name: None, parent_id: Some(photos.id), ..Default::default() };
     s.files.update(&s.alice, file.id, into).await.unwrap();
     let event = events.try_recv().unwrap();
     assert_eq!(event.kind, FileEventKind::Moved);
@@ -673,7 +717,7 @@ async fn moving_tells_the_apps_of_both_places_and_nobody_watching_means_no_event
     assert_eq!(event.files[0].node.parent_id, Some(photos.id), "as it is now");
     assert_eq!(event.files[0].apps, ["notes"]);
 
-    let out = NodeUpdate { name: None, parent_id: Some(root.id) };
+    let out = NodeUpdate { name: None, parent_id: Some(root.id), ..Default::default() };
     s.files.update(&s.alice, file.id, out).await.unwrap();
     let event = events.try_recv().unwrap();
     assert_eq!((event.files[0].node.parent_id, event.files[0].apps.clone()), (Some(root.id), vec!["notes".into()]));
@@ -685,7 +729,7 @@ async fn an_app_given_all_files_still_cannot_reach_other_apps_data() {
     let root = s.files.root(&s.alice).await.unwrap();
     let calendar = s.files.appdata_write(&s.alice, "calendar", "events.json", b"{}".to_vec()).await.unwrap();
     let notes = s.files.appdata_write(&s.alice, "notes", "theme", b"light".to_vec()).await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "a.txt", body("a"), false, None).await.unwrap();
 
     let all = permissions(FileScope::All, true);
     s.files.create_grant(&s.alice, new_grant(root.id, GrantKind::Standing, true), &all).await.unwrap();
@@ -704,8 +748,8 @@ async fn a_folder_grant_covers_what_is_inside_and_nothing_else() {
     let root = s.files.root(&s.alice).await.unwrap();
     let notes = s.files.create_folder(&s.alice, root.id, "Notes").await.unwrap();
     let inner = s.files.create_folder(&s.alice, notes.id, "Work").await.unwrap();
-    let note = s.files.upload(&s.alice, inner.id, "todo.md", body("- [ ] x"), false).await.unwrap();
-    let other = s.files.upload(&s.alice, root.id, "secret.txt", body("x"), false).await.unwrap();
+    let note = s.files.upload(&s.alice, inner.id, "todo.md", body("- [ ] x"), false, None).await.unwrap();
+    let other = s.files.upload(&s.alice, root.id, "secret.txt", body("x"), false, None).await.unwrap();
 
     let allowed = permissions(FileScope::Folder, false);
     s.files.create_grant(&s.alice, new_grant(notes.id, GrantKind::Standing, false), &allowed).await.unwrap();
@@ -722,7 +766,7 @@ async fn apps_get_no_more_than_their_manifest_declares() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
     let folder = s.files.create_folder(&s.alice, root.id, "Notes").await.unwrap();
-    let file = s.files.upload(&s.alice, folder.id, "a.md", body("a"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, folder.id, "a.md", body("a"), false, None).await.unwrap();
     let denied = |result: rustcloud_core::Result<_>| result.unwrap_err().code;
 
     let opened = permissions(FileScope::Opened, true);
@@ -746,7 +790,7 @@ async fn apps_get_no_more_than_their_manifest_declares() {
 async fn closing_or_deleting_ends_access() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let file = s.files.upload(&s.alice, root.id, "doc.md", body("x"), false).await.unwrap();
+    let file = s.files.upload(&s.alice, root.id, "doc.md", body("x"), false, None).await.unwrap();
     let opened = permissions(FileScope::Opened, true);
 
     let session = s.files.create_grant(&s.alice, new_grant(file.id, GrantKind::Session, true), &opened).await.unwrap();
@@ -817,8 +861,8 @@ async fn apps_work_only_inside_what_they_were_given() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
     let notes = s.files.create_folder(&s.alice, root.id, "Notes").await.unwrap();
-    let todo = s.files.upload(&s.alice, notes.id, "todo.md", body("- milk"), false).await.unwrap();
-    let secret = s.files.upload(&s.alice, root.id, "secret.txt", body("x"), false).await.unwrap();
+    let todo = s.files.upload(&s.alice, notes.id, "todo.md", body("- milk"), false, None).await.unwrap();
+    let secret = s.files.upload(&s.alice, root.id, "secret.txt", body("x"), false, None).await.unwrap();
     let write = permissions(FileScope::Folder, true);
     s.files.create_grant(&s.alice, new_grant(notes.id, GrantKind::Standing, true), &write).await.unwrap();
 
@@ -852,7 +896,7 @@ async fn read_only_access_reads_but_never_changes() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
     let photos = s.files.create_folder(&s.alice, root.id, "Photos").await.unwrap();
-    let photo = s.files.upload(&s.alice, photos.id, "cat.jpg", body("jpg"), false).await.unwrap();
+    let photo = s.files.upload(&s.alice, photos.id, "cat.jpg", body("jpg"), false, None).await.unwrap();
     let read = permissions(FileScope::Folder, false);
     s.files.create_grant(&s.alice, new_grant(photos.id, GrantKind::Standing, false), &read).await.unwrap();
 
@@ -871,7 +915,7 @@ async fn read_only_access_reads_but_never_changes() {
 async fn while_an_app_holds_a_lock_only_it_changes_the_file() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let doc = s.files.upload(&s.alice, root.id, "doc.odt", body("v1"), false).await.unwrap();
+    let doc = s.files.upload(&s.alice, root.id, "doc.odt", body("v1"), false, None).await.unwrap();
     let edit = permissions(FileScope::Opened, true);
     for app in ["office", "notes"] {
         let grant = NewGrant { app_id: app.into(), node_id: doc.id, write: true, kind: GrantKind::Session };
@@ -892,12 +936,12 @@ async fn while_an_app_holds_a_lock_only_it_changes_the_file() {
 
     // Others can't change or delete it; the app that holds the lock can.
     let locked = |result: rustcloud_core::Result<_>| code_of(result);
-    assert_eq!(locked(s.files.replace_content(&s.alice, doc.id, body("panel"), None).await), "FILE_LOCKED");
-    assert_eq!(locked(s.files.upload(&s.alice, root.id, "doc.odt", body("x"), true).await), "FILE_LOCKED");
+    assert_eq!(locked(s.files.replace_content(&s.alice, doc.id, body("panel"), None, None).await), "FILE_LOCKED");
+    assert_eq!(locked(s.files.upload(&s.alice, root.id, "doc.odt", body("x"), true, None).await), "FILE_LOCKED");
     assert_eq!(locked(s.files.app_write(&s.alice, "notes", doc.id, b"x".to_vec(), None).await), "FILE_LOCKED");
     assert_eq!(code_of(s.files.delete(&s.alice, doc.id).await), "FILE_LOCKED");
     s.files.app_write(&s.alice, "office", doc.id, b"v2".to_vec(), None).await.unwrap();
-    let renamed = NodeUpdate { name: Some("report.odt".into()), parent_id: None };
+    let renamed = NodeUpdate { name: Some("report.odt".into()), parent_id: None, ..Default::default() };
     s.files.update(&s.alice, doc.id, renamed).await.unwrap();
 
     // The panel sees it.
@@ -914,7 +958,7 @@ async fn while_an_app_holds_a_lock_only_it_changes_the_file() {
     assert!(s.files.children(&s.alice, root.id).await.unwrap()[0].lock.is_none());
     s.files.app_lock(&s.alice, "office", doc.id, "wopi-3", 60).await.unwrap();
     s.files.unlock(&s.alice, doc.id).await.unwrap();
-    s.files.replace_content(&s.alice, doc.id, body("panel"), None).await.unwrap();
+    s.files.replace_content(&s.alice, doc.id, body("panel"), None, None).await.unwrap();
     assert_eq!(code_of(s.files.unlock(&s.bob, doc.id).await), "FILE_NOT_FOUND");
 }
 
@@ -922,11 +966,11 @@ async fn while_an_app_holds_a_lock_only_it_changes_the_file() {
 async fn a_conditional_write_fails_once_the_file_changed() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let doc = s.files.upload(&s.alice, root.id, "doc.md", body("v1"), false).await.unwrap();
+    let doc = s.files.upload(&s.alice, root.id, "doc.md", body("v1"), false, None).await.unwrap();
     let etag = doc.etag.clone().unwrap();
-    let changed = s.files.replace_content(&s.alice, doc.id, body("v2"), Some(&etag)).await.unwrap();
-    assert_eq!(code_of(s.files.replace_content(&s.alice, doc.id, body("v3"), Some(&etag)).await), "FILE_CHANGED");
-    s.files.replace_content(&s.alice, doc.id, body("v3"), changed.etag.as_deref()).await.unwrap();
+    let changed = s.files.replace_content(&s.alice, doc.id, body("v2"), Some(&etag), None).await.unwrap();
+    assert_eq!(code_of(s.files.replace_content(&s.alice, doc.id, body("v3"), Some(&etag), None).await), "FILE_CHANGED");
+    s.files.replace_content(&s.alice, doc.id, body("v3"), changed.etag.as_deref(), None).await.unwrap();
 
     let edit = permissions(FileScope::Opened, true);
     let grant = NewGrant { app_id: "office".into(), node_id: doc.id, write: true, kind: GrantKind::Session };
@@ -949,7 +993,7 @@ fn held_body(text: &'static str, go: tokio::sync::oneshot::Receiver<()>) -> Byte
 async fn a_write_that_was_overtaken_does_not_lose_or_share_content() {
     let s = Arc::new(setup().await);
     let root = s.files.root(&s.alice).await.unwrap();
-    let doc = s.files.upload(&s.alice, root.id, "doc.md", body("v1"), false).await.unwrap();
+    let doc = s.files.upload(&s.alice, root.id, "doc.md", body("v1"), false, None).await.unwrap();
     let etag = doc.etag.clone().unwrap();
 
     // A conditional write that checked the ETag, then waits for its body
@@ -958,11 +1002,11 @@ async fn a_write_that_was_overtaken_does_not_lose_or_share_content() {
     let slow = tokio::spawn({
         let s = s.clone();
         let etag = etag.clone();
-        async move { s.files.replace_content(&s.alice, doc.id, held_body("slow", wait), Some(&etag)).await }
+        async move { s.files.replace_content(&s.alice, doc.id, held_body("slow", wait), Some(&etag), None).await }
     });
     tokio::task::yield_now().await;
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    s.files.replace_content(&s.alice, doc.id, body("fast"), None).await.unwrap();
+    s.files.replace_content(&s.alice, doc.id, body("fast"), None, None).await.unwrap();
     go.send(()).unwrap();
     assert_eq!(code_of(slow.await.unwrap()), "FILE_CHANGED");
     assert_eq!(read(s.files.download(&s.alice, doc.id, None).await.unwrap()).await, "fast");
@@ -972,10 +1016,10 @@ async fn a_write_that_was_overtaken_does_not_lose_or_share_content() {
     let (go, wait) = tokio::sync::oneshot::channel();
     let slow = tokio::spawn({
         let s = s.clone();
-        async move { s.files.replace_content(&s.alice, doc.id, held_body("slow", wait), None).await }
+        async move { s.files.replace_content(&s.alice, doc.id, held_body("slow", wait), None, None).await }
     });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    s.files.replace_content(&s.alice, doc.id, body("fast 2"), None).await.unwrap();
+    s.files.replace_content(&s.alice, doc.id, body("fast 2"), None, None).await.unwrap();
     go.send(()).unwrap();
     slow.await.unwrap().unwrap();
     assert_eq!(read(s.files.download(&s.alice, doc.id, None).await.unwrap()).await, "slow");
@@ -989,7 +1033,7 @@ async fn a_write_that_was_overtaken_does_not_lose_or_share_content() {
 async fn apps_read_the_versions_of_the_files_they_were_given() {
     let s = setup().await;
     let root = s.files.root(&s.alice).await.unwrap();
-    let doc = s.files.upload(&s.alice, root.id, "doc.md", body("old text"), false).await.unwrap();
+    let doc = s.files.upload(&s.alice, root.id, "doc.md", body("old text"), false, None).await.unwrap();
     save_later(&s, doc.id, "new").await;
     assert_eq!(code_of(s.files.app_versions(&s.alice, "office", doc.id).await), "FILE_NOT_FOUND", "no access yet");
 

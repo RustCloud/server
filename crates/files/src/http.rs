@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use futures_util::TryStreamExt;
 use rustcloud_auth::{AdminUser, Auth, CurrentUser};
-use rustcloud_core::{ByteStream, Result};
+use rustcloud_core::{ByteStream, Error, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -112,6 +112,8 @@ struct UploadParams {
     name: String,
     #[serde(default)]
     overwrite: bool,
+    /// See [`parse_mtime`].
+    mtime: Option<String>,
 }
 
 /// Uploads a file: the request body is the raw file content.
@@ -122,8 +124,16 @@ async fn upload(
     Query(params): Query<UploadParams>,
     body: Body,
 ) -> Result<impl IntoResponse> {
-    let node = files.upload(current.user(), parent_id, &params.name, byte_stream(body), params.overwrite).await?;
+    let mtime = params.mtime.as_deref().map(parse_mtime).transpose()?;
+    let body = byte_stream(body);
+    let node = files.upload(current.user(), parent_id, &params.name, body, params.overwrite, mtime).await?;
     Ok((StatusCode::CREATED, Json(node)))
+}
+
+#[derive(Deserialize)]
+struct ContentParams {
+    /// See [`parse_mtime`].
+    mtime: Option<String>,
 }
 
 /// Replaces the content; with `If-Match: "<etag>"`, only if the file still has it.
@@ -131,11 +141,29 @@ async fn replace_content(
     State(files): State<Arc<Files>>,
     current: CurrentUser,
     Path(id): Path<Uuid>,
+    Query(params): Query<ContentParams>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<Node>> {
     let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()).map(|v| v.trim().trim_matches('"'));
-    Ok(Json(files.replace_content(current.user(), id, byte_stream(body), if_match).await?))
+    let mtime = params.mtime.as_deref().map(parse_mtime).transpose()?;
+    Ok(Json(files.replace_content(current.user(), id, byte_stream(body), if_match, mtime).await?))
+}
+
+/// The mtime of an uploaded file: Unix time in seconds (`1730985600`,
+/// `1730985600.25`) or RFC 3339 (`2024-11-07T13:20:00Z`).
+fn parse_mtime(text: &str) -> Result<DateTime<Utc>> {
+    let invalid = || Error::bad_request("INVALID_MTIME", "mtime must be Unix seconds or an RFC 3339 time");
+    let text = text.trim();
+    if let Ok(seconds) = text.parse::<f64>() {
+        if !seconds.is_finite() {
+            return Err(invalid());
+        }
+        let micros = (seconds * 1e6).round();
+        // Beyond ±292 000 years `as` would saturate; check_mtime refuses those anyway.
+        return DateTime::from_timestamp_micros(micros as i64).ok_or_else(invalid);
+    }
+    DateTime::parse_from_rfc3339(text).map(|time| time.with_timezone(&Utc)).map_err(|_| invalid())
 }
 
 async fn unlock(State(files): State<Arc<Files>>, current: CurrentUser, Path(id): Path<Uuid>) -> Result<StatusCode> {
@@ -312,4 +340,20 @@ async fn public_download(
 /// The request body as a stream of byte chunks.
 fn byte_stream(body: Body) -> ByteStream {
     Box::pin(body.into_data_stream().map_err(io::Error::other))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mtime;
+
+    #[test]
+    fn mtimes_are_unix_seconds_or_rfc3339() {
+        let at = |text| parse_mtime(text).map(|time| time.to_rfc3339()).ok();
+        assert_eq!(at("1730985600").as_deref(), Some("2024-11-07T13:20:00+00:00"));
+        assert_eq!(at("1730985600.25").as_deref(), Some("2024-11-07T13:20:00.250+00:00"));
+        assert_eq!(at("2024-11-07T16:20:00+03:00").as_deref(), Some("2024-11-07T13:20:00+00:00"));
+        assert_eq!(at("yesterday"), None);
+        assert_eq!(at("NaN"), None);
+        assert_eq!(at("1e300"), None);
+    }
 }

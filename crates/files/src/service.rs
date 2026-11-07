@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use futures_util::StreamExt;
 use rustcloud_auth::User;
 use rustcloud_core::{audit, validate, BlobStore, ByteRange, ByteStream, Error, ErrorKind, Live, Result};
@@ -45,7 +45,11 @@ pub struct Node {
     /// Changes whenever the content changes (hex SHA-256); `None` for folders.
     pub etag: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// When the server last changed it: content, name or place.
     pub updated_at: DateTime<Utc>,
+    /// When its content was last changed, as the client that wrote it said
+    /// (the mtime of the file on that device); `updated_at` if it didn't say.
+    pub modified_at: DateTime<Utc>,
     /// When it went to the trash; only for what is in it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trashed_at: Option<DateTime<Utc>>,
@@ -67,18 +71,21 @@ impl From<node::Model> for Node {
             etag: row.sha256,
             created_at: row.created_at,
             updated_at: row.updated_at,
+            modified_at: row.modified_at.unwrap_or(row.updated_at),
             trashed_at: row.trashed_at,
             lock: None,
         }
     }
 }
 
-/// Rename and/or move. Missing fields stay as they are.
+/// Rename, move and/or set the mtime. Missing fields stay as they are.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NodeUpdate {
     pub name: Option<String>,
     /// New parent folder.
     pub parent_id: Option<Uuid>,
+    /// New mtime of a file (see [`Node::modified_at`]).
+    pub modified_at: Option<DateTime<Utc>>,
 }
 
 /// Storage used by a user.
@@ -99,11 +106,13 @@ pub(crate) struct Writer<'a> {
     pub versioning: Versioning,
     /// The ETag the file must still have; `FILE_CHANGED` otherwise.
     pub if_match: Option<&'a str>,
+    /// The mtime of the new content (checked with [`check_mtime`]); `None`: now.
+    pub mtime: Option<DateTime<Utc>>,
 }
 
 impl<'a> Writer<'a> {
     pub fn user() -> Self {
-        Self { app: None, versioning: Versioning::Keep, if_match: None }
+        Self { app: None, versioning: Versioning::Keep, if_match: None, mtime: None }
     }
 
     pub fn app(app_id: &'a str) -> Self {
@@ -247,10 +256,13 @@ impl Files {
         name: &str,
         body: ByteStream,
         overwrite: bool,
+        mtime: Option<DateTime<Utc>>,
     ) -> Result<Node> {
         let name = validate::file_name(name)?;
+        let mtime = mtime.map(check_mtime).transpose()?;
         let parent = self.writable_folder(user, parent_id).await?;
-        let (file, replaced) = self.put_file(user, &parent, name, body, overwrite, Writer::user()).await?;
+        let writer = Writer { mtime, ..Writer::user() };
+        let (file, replaced) = self.put_file(user, &parent, name, body, overwrite, writer).await?;
         let kind = if replaced { FileEventKind::Changed } else { FileEventKind::Created };
         self.emit_for(kind, file.id, None).await;
         if replaced {
@@ -286,6 +298,7 @@ impl Files {
         file.content_key = Set(Some(stored.key.clone()));
         file.sha256 = Set(Some(stored.sha256));
         file.modified_by = Set(Some(user.id));
+        file.modified_at = Set(writer.mtime);
 
         match file.insert(&self.db).await {
             Ok(file) => {
@@ -307,14 +320,16 @@ impl Files {
         id: Uuid,
         body: ByteStream,
         if_match: Option<&str>,
+        mtime: Option<DateTime<Utc>>,
     ) -> Result<Node> {
+        let mtime = mtime.map(check_mtime).transpose()?;
         let file = self.accessible(user, id).await?;
         if file.is_dir {
             return Err(Error::bad_request("NOT_A_FILE", "This is a folder"));
         }
         self.refuse_trash(&file).await?;
         let name = file.name.clone();
-        let updated = self.write_content(user, file, body, Writer { if_match, ..Writer::user() }).await?;
+        let updated = self.write_content(user, file, body, Writer { if_match, mtime, ..Writer::user() }).await?;
         self.emit_for(FileEventKind::Changed, updated.id, None).await;
         audit!("file.upload", name, size = updated.size, replaced = true, "file uploaded");
         Ok(updated)
@@ -345,6 +360,12 @@ impl Files {
         }
 
         let mut row: node::ActiveModel = node.clone().into();
+        if let Some(mtime) = update.modified_at {
+            if node.is_dir {
+                return Err(Error::bad_request("NOT_A_FILE", "Only files have a modification time"));
+            }
+            row.modified_at = Set(Some(check_mtime(mtime)?));
+        }
         if let Some(name) = &update.name {
             row.name = Set(validate::file_name(name)?.to_owned());
         }
@@ -622,6 +643,7 @@ impl Files {
             copy.mime_type = Set(source.mime_type.clone());
             copy.sha256 = Set(source.sha256.clone());
             copy.modified_by = Set(source.modified_by);
+            copy.modified_at = Set(Some(source.modified_at.unwrap_or(source.updated_at)));
             copy.content_key = Set(Some(key_copy.clone()));
             new_key = Some(key_copy);
         }
@@ -670,7 +692,7 @@ impl Files {
         }
         let stored = self.store(user, body, file.size).await?;
 
-        let (old, updated) = match self.put_in_place(user, file, &stored, writer.if_match.is_some()).await {
+        let (old, updated) = match self.put_in_place(user, file, &stored, writer).await {
             Ok(done) => done,
             Err(err) => {
                 self.discard_blob(&stored.key).await;
@@ -696,21 +718,21 @@ impl Files {
     /// Puts `stored` into the row of `file`. The row changes only if it still
     /// holds the content read before, so two writes at once can't both replace
     /// (and keep, or remove) the same old content, and an ETag checked before
-    /// holds up to the very write. If someone wrote in between, `strict` fails
-    /// with `FILE_CHANGED`; otherwise this content goes over theirs.
+    /// holds up to the very write. If someone wrote in between, a writer with
+    /// an ETag fails with `FILE_CHANGED`; otherwise this content goes over theirs.
     /// The row as it was and as it is now.
     async fn put_in_place(
         &self,
         user: &User,
         mut file: node::Model,
         stored: &StoredBlob,
-        strict: bool,
+        writer: Writer<'_>,
     ) -> Result<(node::Model, node::Model)> {
         loop {
-            if let Some(updated) = self.swap_content(user, &file, stored).await? {
+            if let Some(updated) = self.swap_content(user, &file, stored, writer.mtime).await? {
                 return Ok((file, updated));
             }
-            if strict {
+            if writer.if_match.is_some() {
                 return Err(file_changed());
             }
             file = self.row(file.id).await?;
@@ -722,7 +744,13 @@ impl Files {
 
     /// Puts `stored` into the row of `old` if the row still holds the content
     /// of `old`; `None` if someone replaced it in the meantime.
-    async fn swap_content(&self, user: &User, old: &node::Model, stored: &StoredBlob) -> Result<Option<node::Model>> {
+    async fn swap_content(
+        &self,
+        user: &User,
+        old: &node::Model,
+        stored: &StoredBlob,
+        mtime: Option<DateTime<Utc>>,
+    ) -> Result<Option<node::Model>> {
         let now = Utc::now();
         let still_old = match &old.content_key {
             Some(key) => node::Column::ContentKey.eq(key.clone()),
@@ -734,6 +762,7 @@ impl Files {
             .col_expr(node::Column::Sha256, Expr::value(stored.sha256.clone()))
             .col_expr(node::Column::ModifiedBy, Expr::value(user.id))
             .col_expr(node::Column::UpdatedAt, Expr::value(now))
+            .col_expr(node::Column::ModifiedAt, Expr::value(mtime))
             .filter(node::Column::Id.eq(old.id))
             .filter(still_old)
             .exec(&self.db)
@@ -744,6 +773,7 @@ impl Files {
             sha256: Some(stored.sha256.clone()),
             modified_by: Some(user.id),
             updated_at: now,
+            modified_at: mtime,
             ..old.clone()
         }))
     }
@@ -920,7 +950,22 @@ fn new_node(owner_id: Uuid, parent_id: Option<Uuid>, name: &str, is_dir: bool) -
         trashed_at: Set(None),
         trashed_from: Set(None),
         modified_by: Set(None),
+        modified_at: Set(None),
     }
+}
+
+/// How far ahead of the server's clock an mtime may be: clocks of devices
+/// are seldom exact, but a file from next year is a mistake.
+const MTIME_AHEAD: chrono::Duration = chrono::Duration::days(1);
+
+/// An mtime a client sent, if it makes sense: not before 1970 and not in
+/// the future (beyond [`MTIME_AHEAD`]).
+pub(crate) fn check_mtime(mtime: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    if mtime < DateTime::UNIX_EPOCH || mtime > Utc::now() + MTIME_AHEAD {
+        return Err(Error::bad_request("INVALID_MTIME", "The modification time is out of range"));
+    }
+    // Databases keep microseconds.
+    Ok(mtime.trunc_subsecs(6))
 }
 
 /// MIME type from the file extension; `application/octet-stream` if unknown.

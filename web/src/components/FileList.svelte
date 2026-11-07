@@ -124,7 +124,7 @@
           </button>
         </td>
         <td class="size">{node.is_dir ? '' : formatBytes(node.size)}</td>
-        <td class="date">{formatDate(node.updated_at, locale)}</td>
+        <td class="date">{formatDate(node.modified_at, locale)}</td>
         {#if actions}<td class="actions">{@render actions(node)}</td>{/if}
       </tr>
     {/each}

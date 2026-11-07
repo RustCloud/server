@@ -23,6 +23,7 @@ impl MigratorTrait for Migrator {
             Box::new(FileVersions),
             Box::new(FileLocks),
             Box::new(OidcProviders),
+            Box::new(FileMtime),
         ]
     }
 }
@@ -528,6 +529,24 @@ impl MigrationTrait for OidcProviders {
                     .to_owned(),
             )
             .await
+    }
+}
+
+/// When the content of a file was last changed as its client says
+/// (`nodes.modified_at`, the mtime); `NULL` means the same as `updated_at`.
+struct FileMtime;
+
+impl MigrationName for FileMtime {
+    fn name(&self) -> &str {
+        "m0014_file_mtime"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for FileMtime {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let column = timestamp_with_time_zone_null("modified_at");
+        manager.alter_table(Table::alter().table("nodes").add_column(column).to_owned()).await
     }
 }
 

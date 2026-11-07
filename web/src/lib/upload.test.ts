@@ -13,6 +13,7 @@ function folder(id: string, name: string): FileNode {
     etag: null,
     created_at: '',
     updated_at: '',
+    modified_at: '',
   };
 }
 
