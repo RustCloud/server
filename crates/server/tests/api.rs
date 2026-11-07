@@ -2899,3 +2899,18 @@ async fn public_links_may_have_a_password_and_take_uploads() {
     let no_upload = app.send(Method::POST, &upload, As::Anonymous, Body::from("x"), &[]).await;
     assert_eq!(no_upload.json()["error"]["code"], "UPLOAD_NOT_ALLOWED");
 }
+
+#[tokio::test]
+async fn without_the_media_engine_there_are_no_thumbnails() {
+    let app = TestApp::new().await;
+    let cookie = app.register("alice").await;
+    let root = app.root_id(&cookie).await;
+    let photo = app.upload(&cookie, &root, "cat.jpg", "not really a jpeg").await;
+    assert_eq!(app.get("/api/v1/info", As::Anonymous).await.json()["thumbnails"], false);
+    let uri = format!("/api/v1/files/{}/thumbnail?size=small", photo["id"].as_str().unwrap());
+    let reply = app.get(&uri, As::Browser(&cookie)).await;
+    assert_eq!(reply.json()["error"]["code"], "NO_THUMBNAIL");
+    assert_eq!(app.get(&uri, As::Anonymous).await.status, StatusCode::UNAUTHORIZED);
+    let wrong_size = format!("{uri}x");
+    assert_eq!(app.get(&wrong_size, As::Browser(&cookie)).await.status, StatusCode::BAD_REQUEST);
+}

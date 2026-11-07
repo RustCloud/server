@@ -444,6 +444,7 @@
     {#if inTrash ? items.length : items.some(isShown)}
       <FileList
         nodes={items}
+        thumbnail={(node) => api.thumbnailUrl(node)}
         onopen={open}
         bind:selected
         showAll={inTrash}

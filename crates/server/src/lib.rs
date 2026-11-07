@@ -27,6 +27,7 @@ mod plugins;
 mod service_proxy;
 pub mod settings_file;
 mod system;
+mod thumbnails;
 mod use_ffmpeg;
 mod use_onnx;
 mod web;
@@ -77,6 +78,7 @@ pub struct AppState {
     pub links: Arc<app_links::AppLinks>,
     pub proxy: Arc<service_proxy::ServiceProxy>,
     pub oidc: Arc<oidc::Oidc>,
+    pub thumbnails: Arc<thumbnails::Thumbnails>,
 }
 
 impl AppState {
@@ -143,6 +145,9 @@ impl AppState {
         let bodies = config.startup.data_dir.join("tmp").join("request-bodies");
         let _ = std::fs::remove_dir_all(&bodies);
         let links = Arc::new(app_links::AppLinks::new(files.clone(), storage, media.clone(), tokens, bodies));
+        let thumbnails =
+            Arc::new(thumbnails::Thumbnails::new(config.startup.data_dir.join("thumbnails"), media.clone()));
+        thumbnails.start_cleanup();
         let jobs = Arc::new(Jobs::new(db.clone(), files.clone(), auth.clone(), plugins.clone(), links.clone()));
         let proxy =
             Arc::new(service_proxy::ServiceProxy::new(plugin_settings.clone(), config.startup.listen, Arc::default())?);
@@ -168,6 +173,7 @@ impl AppState {
             links,
             proxy,
             oidc,
+            thumbnails,
             settings: Arc::new(SettingsFile::new(config, sections)?),
             plugins,
             catalog,
@@ -193,6 +199,7 @@ pub fn app(state: AppState) -> Router {
         .merge(use_ffmpeg::router())
         .merge(use_onnx::router())
         .merge(system::router())
+        .merge(thumbnails::router())
         .merge(app_routes::router())
         .merge(app_links::router())
         .route("/api/v1/info", get(info))
@@ -230,9 +237,16 @@ async fn health(State(db): State<DatabaseConnection>) -> Result<Json<Value>> {
 }
 
 /// `GET /api/v1/info`: what the web UI needs to know about the server.
-async fn info(State(server): State<Arc<Live<ServerSettings>>>) -> Json<Value> {
+async fn info(
+    State(server): State<Arc<Live<ServerSettings>>>,
+    State(thumbnails): State<Arc<thumbnails::Thumbnails>>,
+) -> Json<Value> {
     let public_url = server.read(|s| s.public_url.trim_end_matches('/').to_owned());
-    Json(json!({ "version": env!("CARGO_PKG_VERSION"), "public_url": public_url }))
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "public_url": public_url,
+        "thumbnails": thumbnails.available(),
+    }))
 }
 
 /// The apps of this server and what each may take at once, for the panel.

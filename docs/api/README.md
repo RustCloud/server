@@ -49,6 +49,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/files/root
 
 ## Служебное
 
-`GET /api/v1/info` → `{"version": "…", "public_url": "…"}` — без авторизации.
+`GET /api/v1/info` → `{"version": "…", "public_url": "…", "thumbnails": true}` — без авторизации;
+`thumbnails` — умеет ли сервер делать [превью](files.md#превью).
 
 `GET /health` → `{"status": "ok", "version": "…"}`, `500`, если база недоступна.

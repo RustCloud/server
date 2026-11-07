@@ -4,6 +4,7 @@
   import { formatBytes, formatDate } from '../lib/format';
   import { errorText, locale, t } from '../lib/i18n';
   import { go, href } from '../lib/router.svelte';
+  import { loadServerInfo } from '../lib/server.svelte';
   import FileList from '../components/FileList.svelte';
   import Icon from '../components/Icon.svelte';
   import Logo from '../components/Logo.svelte';
@@ -34,6 +35,7 @@
   $effect(() => {
     load();
   });
+  loadServerInfo();
 
   async function unlock(event: SubmitEvent) {
     event.preventDefault();
@@ -111,7 +113,7 @@
         </nav>
         {#if error}<p class="error">{error}</p>{/if}
         {#if uploaded}<p class="muted small">{t.uploadedCount(uploaded)}</p>{/if}
-        <FileList nodes={view.children} onopen={open}>
+        <FileList nodes={view.children} onopen={open} thumbnail={(node) => api.publicThumbnailUrl(token, node)}>
           {#snippet actions(node)}
             {#if !node.is_dir}
               <a class="button small" href={api.publicContentUrl(token, node.id, true)} download>

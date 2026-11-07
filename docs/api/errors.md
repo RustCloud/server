@@ -81,7 +81,7 @@
 
 ## 404 Not Found
 
-`FILE_NOT_FOUND`, `VERSION_NOT_FOUND`, `USER_NOT_FOUND`, `SHARE_NOT_FOUND` (в т.ч. истёкшая ссылка и закрытый
+`FILE_NOT_FOUND`, `VERSION_NOT_FOUND`, `NO_THUMBNAIL`, `USER_NOT_FOUND`, `SHARE_NOT_FOUND` (в т.ч. истёкшая ссылка и закрытый
 [общий доступ](app-shares.md)),
 `SETTINGS_NOT_FOUND`, `OIDC_PROVIDER_NOT_FOUND`, `LOGIN_NOT_FOUND`, `SESSION_NOT_FOUND`, `UPLOAD_NOT_FOUND` (в т.ч. брошенная загрузка по частям), `APP_NOT_FOUND` (в т.ч. отключённый плагин), `PLUGIN_NOT_FOUND`, `GRANT_NOT_FOUND` (в т.ч. закончившаяся сессия), `APP_PASSWORD_NOT_FOUND`,
 `NOT_FOUND` (нет такого API-маршрута).

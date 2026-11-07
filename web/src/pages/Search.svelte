@@ -36,7 +36,7 @@
 {:else if results.length === 0}
   <p class="muted">{t.nothingFound}</p>
 {:else}
-  <FileList nodes={results} onopen={open}>
+  <FileList nodes={results} onopen={open} thumbnail={(node) => api.thumbnailUrl(node)}>
     {#snippet actions(node)}
       {#if node.parent_id}
         <button type="button" class="small" onclick={() => go('/files/' + node.parent_id)}>{t.openFolder}</button>

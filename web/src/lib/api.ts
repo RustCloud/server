@@ -620,6 +620,9 @@ export const api = {
   search: (query: string) => request<FileNode[]>('GET', `/api/v1/files/search?q=${enc(query)}`),
   usage: () => request<Usage>('GET', '/api/v1/usage'),
   zipUrl: (id: string) => `/api/v1/files/${id}/zip`,
+  /** `v` changes with the content, so a browser never shows an old picture. */
+  thumbnailUrl: (node: FileNode, size: 'small' | 'large' = 'small') =>
+    `/api/v1/files/${node.id}/thumbnail?size=${size}&v=${node.etag ?? ''}`,
   contentUrl: (id: string, download = false) => `/api/v1/files/${id}/content${download ? '?download=1' : ''}`,
   unlock: (id: string) => request<void>('DELETE', `/api/v1/files/${id}/lock`),
   versions: (id: string) => request<Versions>('GET', `/api/v1/files/${id}/versions`),
@@ -645,6 +648,8 @@ export const api = {
   deleteShare: (id: string) => request<void>('DELETE', `/api/v1/shares/${id}`),
   publicView: (token: string, nodeId?: string) =>
     request<PublicView>('GET', `/api/v1/public/${enc(token)}${nodeId ? `?node=${nodeId}` : ''}`),
+  publicThumbnailUrl: (token: string, node: FileNode, size: 'small' | 'large' = 'small') =>
+    `/api/v1/public/${enc(token)}/thumbnail?node=${node.id}&size=${size}&v=${node.etag ?? ''}`,
   publicZipUrl: (token: string, nodeId?: string) =>
     `/api/v1/public/${enc(token)}/zip${nodeId ? `?node=${nodeId}` : ''}`,
   publicContentUrl: (token: string, nodeId?: string, download = false) => {
@@ -656,7 +661,7 @@ export const api = {
   },
 
   // Server
-  info: () => request<{ version: string; public_url: string }>('GET', '/api/v1/info'),
+  info: () => request<{ version: string; public_url: string; thumbnails: boolean }>('GET', '/api/v1/info'),
 
   // Apps' own paths (with the user's session, like their pages)
   /** The content of a new file from an app's template path. */

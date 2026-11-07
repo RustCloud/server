@@ -6,6 +6,8 @@
   import { formatBytes, formatDate } from '../lib/format';
   import { locale, t } from '../lib/i18n';
   import { isHidden, isShown } from '../lib/prefs.svelte';
+  import { server } from '../lib/server.svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import Icon from './Icon.svelte';
 
   let {
@@ -16,6 +18,7 @@
     ondragnode,
     ondropnode,
     showAll = false,
+    thumbnail,
   }: {
     nodes: FileNode[];
     /** Called when a name is clicked. */
@@ -28,6 +31,8 @@
     ondragnode?: (node: FileNode, event: DragEvent) => void;
     /** Makes folder rows drop targets; called on a drop. */
     ondropnode?: (folder: FileNode, event: DragEvent) => void;
+    /** The address of a photo's or video's thumbnail; icons only without it. */
+    thumbnail?: (node: FileNode) => string;
     /** Hidden files too, whatever the preference (the trash shows all it has). */
     showAll?: boolean;
   } = $props();
@@ -76,6 +81,20 @@
     selected = allSelected ? [] : nodes.map((n) => n.id);
   }
 
+  /** Files whose thumbnail didn't load: they keep their icon. */
+  const noThumbnail = new SvelteSet<string>();
+
+  function hasThumbnail(node: FileNode): boolean {
+    const mime = node.mime_type ?? '';
+    return (
+      !!thumbnail &&
+      server.thumbnails &&
+      !node.is_dir &&
+      (mime.startsWith('image/') || mime.startsWith('video/')) &&
+      !noThumbnail.has(node.id)
+    );
+  }
+
   function iconFor(node: FileNode) {
     if (node.is_dir) return 'folder' as const;
     return node.mime_type?.startsWith('image/') ? ('image' as const) : ('file' as const);
@@ -116,7 +135,11 @@
         {/if}
         <td class="name">
           <button type="button" class="link" onclick={() => onopen(node)}>
-            <span class:folder={node.is_dir}><Icon name={iconFor(node)} /></span>
+            {#if thumbnail && hasThumbnail(node)}
+              <img class="thumb" src={thumbnail(node)} alt="" loading="lazy" onerror={() => noThumbnail.add(node.id)} />
+            {:else}
+              <span class:folder={node.is_dir}><Icon name={iconFor(node)} /></span>
+            {/if}
             <span class="label">{node.name}</span>
             {#if node.lock}
               <span class="lock muted" title={t.lockedBy(appName(node.lock.app_id))}><Icon name="lock" size={14} /></span>
@@ -172,6 +195,15 @@
   }
   .label {
     overflow-wrap: anywhere;
+  }
+  .thumb {
+    width: 32px;
+    height: 32px;
+    object-fit: cover;
+    border-radius: 4px;
+    flex: none;
+    margin: -6px 0;
+    background: var(--border-soft);
   }
   .folder {
     color: var(--accent);

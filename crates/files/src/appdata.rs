@@ -13,6 +13,7 @@ use futures_util::{stream, StreamExt};
 use rustcloud_auth::User;
 use rustcloud_core::{validate, ByteRange, ByteStream, Error, ErrorKind, Result};
 use rustcloud_db::node;
+use uuid::Uuid;
 
 use crate::service::{Download, Files, Node, Writer};
 use crate::versions::Versioning;
@@ -83,6 +84,32 @@ impl Files {
         let (parent, name) = self.appdata_parent(user, app_id, path, false).await?;
         let file = self.child_by_name(parent.id, name).await?.filter(|n| !n.is_dir).ok_or_else(not_found)?;
         self.open_local(&file).await
+    }
+
+    /// A file of the user opened for reading, for the media engine
+    /// (thumbnails), with what it is.
+    pub async fn open_for_media(&self, user: &User, id: Uuid) -> Result<(Node, std::fs::File)> {
+        let file = self.accessible(user, id).await?;
+        self.media_file(file).await
+    }
+
+    /// A file reached through a public link opened for the media engine.
+    pub async fn public_open_for_media(
+        &self,
+        token: &str,
+        key: Option<&str>,
+        node_id: Option<Uuid>,
+    ) -> Result<(Node, std::fs::File)> {
+        let file = self.public_node(token, key, node_id).await?;
+        self.media_file(file).await
+    }
+
+    async fn media_file(&self, file: node::Model) -> Result<(Node, std::fs::File)> {
+        if file.is_dir || file.trashed_at.is_some() {
+            return Err(not_found());
+        }
+        let local = self.open_local(&file).await?;
+        Ok((file.into(), local))
     }
 
     /// A file's content as a file opened for reading.
