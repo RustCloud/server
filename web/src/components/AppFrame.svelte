@@ -6,7 +6,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { api, type FileNode, type Grant } from '../lib/api';
-  import { mimeMatches, serviceOrigin } from '../lib/apps';
+  import { extensionMatches, mimeMatches, serviceOrigin } from '../lib/apps';
   import { apps, takeChosen } from '../lib/apps.svelte';
   import { allowedHeaders, ANSWER_HEADERS, appRequestUrl, BODY_LIMIT, requestBody, type BridgeRequest } from '../lib/bridge';
   import AccessDialog from './AccessDialog.svelte';
@@ -144,7 +144,12 @@
     const entries = apps.manifests.find((app) => app.id === id)?.open_with ?? [];
     try {
       const node = (await api.details(fileId)).node;
-      const opener = entries.find((open) => '/' + path === open.page && mimeMatches(open.mime, node.mime_type));
+      // The same match as the files' menu: by type or by the name's extension.
+      const opener = entries.find(
+        (open) =>
+          '/' + path === open.page &&
+          (mimeMatches(open.mime, node.mime_type) || extensionMatches(open.extensions, node.name)),
+      );
       if (!opener) {
         openError = t.appCannotOpen;
         return;
