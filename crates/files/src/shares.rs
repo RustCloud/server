@@ -79,9 +79,10 @@ pub struct PublicView {
 }
 
 impl Files {
-    /// Creates a public link to a node. `expires_at` must be in the future.
+    /// Creates a public link to a node of the user's own: what others shared
+    /// with them they don't pass on. `expires_at` must be in the future.
     pub async fn create_share(&self, user: &User, node_id: Uuid, options: ShareOptions) -> Result<Share> {
-        let node = self.get(user, node_id).await?;
+        let node: Node = self.accessible(user, node_id).await?.into();
         if node.parent_id.is_none() {
             return Err(Error::bad_request("ROOT_FOLDER", "The root folder cannot be shared"));
         }
@@ -298,7 +299,10 @@ impl Files {
             return Err(gone());
         }
         let node = self.row(share.node_id).await?;
-        if node.trashed_at.is_some() {
+        // Only the owner's own links open anything: one made by someone the
+        // node was shared with (servers before 2026-11-14 allowed that) would
+        // outlive the share.
+        if node.trashed_at.is_some() || share.owner_id != node.owner_id {
             return Err(gone());
         }
         // A disabled account shares nothing any more.

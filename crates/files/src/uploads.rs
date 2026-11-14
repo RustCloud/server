@@ -113,8 +113,13 @@ impl Files {
                 "The file is larger than the upload limit",
             ));
         }
-        if self.remaining_quota(user).await?.is_some_and(|left| upload.size > left) {
-            return Err(Error::new(ErrorKind::PayloadTooLarge, "QUOTA_EXCEEDED", "Not enough storage quota"));
+        // The uploader sets the size aside; the file is paid by the folder's
+        // owner, so it must fit there too (checked again at the end).
+        let payer = self.payer(user, folder.owner_id).await?;
+        for quota_of in [user, &payer] {
+            if self.remaining_quota(quota_of).await?.is_some_and(|left| upload.size > left) {
+                return Err(Error::new(ErrorKind::PayloadTooLarge, "QUOTA_EXCEEDED", "Not enough storage quota"));
+            }
         }
         if self.disk_room().await?.is_some_and(|room| upload.size as u64 > room) {
             return Err(Error::new(ErrorKind::PayloadTooLarge, "STORAGE_FULL", "The server's storage is full"));
@@ -373,7 +378,11 @@ impl Files {
                 })
                 .try_flatten(),
         );
-        let writer = Writer { mtime: session.mtime, reserved: session.size, sha256: Some(sha256), ..Writer::user() };
+        // The session's size is set aside in the quota of the user who
+        // uploads; a file that goes into someone else's folder (shared for
+        // changes) is paid from that owner's quota, where nothing was set aside.
+        let reserved = if folder.owner_id == user.id { session.size } else { 0 };
+        let writer = Writer { mtime: session.mtime, reserved, sha256: Some(sha256), ..Writer::user() };
         self.put_file(user, &folder, &session.name, body, session.overwrite, writer).await
     }
 

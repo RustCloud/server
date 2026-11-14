@@ -10,8 +10,8 @@ use rustcloud_core::{ByteRange, ByteStream, Live};
 use rustcloud_db::testing::{test_db, TestDb};
 use rustcloud_db::{file_change, file_version, node, share, upload_session};
 use rustcloud_files::{
-    ChangeKind, Download, FileEventKind, Files, FilesSettings, GrantKind, Locking, NewGrant, NewUpload, NodeUpdate,
-    ShareOptions,
+    ChangeKind, Download, FileEventKind, Files, FilesSettings, GrantKind, Locking, NewAccess, NewGrant, NewUpload,
+    NodeUpdate, ShareOptions,
 };
 use rustcloud_plugin_api::{FileScope, Permissions};
 use rustcloud_storage_local::LocalBlobStore;
@@ -411,6 +411,40 @@ async fn public_link_gives_read_access_to_a_folder_and_nothing_else() {
 
     s.files.delete_share(&s.alice, link.id).await.unwrap();
     assert_eq!(s.files.public_view(&link.token, None, None).await.unwrap_err().code, "SHARE_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn only_the_owner_makes_public_links_and_only_the_owners_open() {
+    let s = setup().await;
+    let root = s.files.root(&s.alice).await.unwrap();
+    let docs = s.files.create_folder(&s.alice, root.id, "Docs").await.unwrap();
+    s.files.upload(&s.alice, docs.id, "secret.txt", body("secret"), false, None).await.unwrap();
+    for write in [false, true] {
+        let access = NewAccess { username: Some("bob".into()), group_id: None, write };
+        s.files.grant_access(&s.alice, docs.id, access).await.unwrap();
+        let options = ShareOptions { allow_upload: Some(true), ..Default::default() };
+        let refused = s.files.create_share(&s.bob, docs.id, options).await;
+        assert_eq!(code_of(refused), "FILE_NOT_FOUND", "bob passes nothing of alice's on (write: {write})");
+    }
+
+    // A link someone else made before (older servers allowed it) opens nothing.
+    let token = "made-by-bob";
+    share::ActiveModel {
+        id: Set(uuid::Uuid::new_v4()),
+        token: Set(token.into()),
+        node_id: Set(docs.id),
+        owner_id: Set(s.bob.id),
+        expires_at: Set(None),
+        created_at: Set(chrono::Utc::now()),
+        password_hash: Set(None),
+        allow_upload: Set(true),
+    }
+    .insert(&s.db.conn)
+    .await
+    .unwrap();
+    assert_eq!(s.files.public_view(token, None, None).await.unwrap_err().code, "SHARE_NOT_FOUND");
+    let upload = s.files.public_upload(token, None, None, "x.txt", body("x")).await;
+    assert_eq!(code_of(upload), "SHARE_NOT_FOUND");
 }
 
 #[tokio::test]
@@ -1224,6 +1258,29 @@ async fn uploads_in_parts_take_their_size_of_the_quota_at_once() {
     s.files.upload_part(&alice, session.id, 0, body("123456789012345")).await.unwrap();
     s.files.finish_upload(&alice, session.id, &sha256_of("123456789012345")).await.unwrap();
     assert_eq!(s.files.usage(&alice).await.unwrap().used_bytes, 15);
+}
+
+#[tokio::test]
+async fn uploads_in_parts_into_a_shared_folder_fit_the_owners_quota() {
+    let s = setup().await;
+    let mut alice: rustcloud_db::user::ActiveModel =
+        rustcloud_db::user::Entity::find_by_id(s.alice.id).one(&s.db.conn).await.unwrap().unwrap().into();
+    alice.quota_bytes = Set(Some(10));
+    let alice = User::from(alice.update(&s.db.conn).await.unwrap());
+    let root = s.files.root(&alice).await.unwrap();
+    let shared = s.files.create_folder(&alice, root.id, "Shared").await.unwrap();
+    let access = NewAccess { username: Some("bob".into()), group_id: None, write: true };
+    s.files.grant_access(&alice, shared.id, access).await.unwrap();
+
+    let too_large = s.files.start_upload(&s.bob, shared.id, new_upload("big", 11)).await;
+    assert_eq!(code_of(too_large), "QUOTA_EXCEEDED", "bob's own quota is unlimited, alice's is not");
+
+    let session = s.files.start_upload(&s.bob, shared.id, new_upload("eight", 8)).await.unwrap();
+    s.files.upload_part(&s.bob, session.id, 0, body("12345678")).await.unwrap();
+    s.files.upload(&alice, root.id, "mine", body("12345"), false, None).await.unwrap();
+    let finished = s.files.finish_upload(&s.bob, session.id, &sha256_of("12345678")).await;
+    assert_eq!(code_of(finished), "QUOTA_EXCEEDED", "5 + 8 bytes don't fit into alice's 10");
+    assert_eq!(s.files.usage(&alice).await.unwrap().used_bytes, 5);
 }
 
 #[tokio::test]
