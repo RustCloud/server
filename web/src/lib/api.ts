@@ -182,6 +182,8 @@ export interface AppManifest {
     frame?: string[];
     /** Native tools of the server it uses: `ffmpeg`, `onnx`. */
     use?: string[];
+    /** `any`: the app's page may show pictures from any site (since 0.2.18). */
+    images?: 'own' | 'any';
   };
   /** The app's entry in the side panel; missing for apps without pages. */
   ui?: { icon: string; entry: string; routes?: string[] };

@@ -21,6 +21,7 @@ use axum::Router;
 use rustcloud_auth::{basic_credentials, from_a_web_page, Access, CurrentUser};
 use rustcloud_core::{audit, ClientInfo, Error, Result};
 use rustcloud_files::{Files, Locking};
+use rustcloud_plugin_api::Images;
 use rustcloud_wasm_host::{
     AppDataEntry, AppToken, Caller, FileLock, FileNode, FileVersion, JobProgress, LinkTarget, NewJob, Request, Share,
     StreamMode, TokenScope, User, UserServices, BODY_SIZE_HEADER, SEND_HEADER,
@@ -33,9 +34,41 @@ use crate::app_tokens::{token_of, TokenClaims, TOKEN_MAX_SECONDS};
 use crate::plugin_jobs::Jobs;
 use crate::AppState;
 
-/// What an app's responses may do in the browser: run scripts and forms in
-/// a unique origin, nothing with the cloud's own; be framed only by the cloud.
-const SANDBOX: &str = "sandbox allow-scripts allow-forms allow-downloads; frame-ancestors 'self'";
+/// The Content-Security-Policy of an app's responses. In the browser its
+/// page runs scripts and forms in a unique origin, nothing with the cloud's
+/// own, and may be framed only by the cloud. It loads and sends things only
+/// to this server, as `permissions.network` promises the administrator for
+/// the app's code: anything else could carry the user's data away. The
+/// exceptions are what the manifest asks for: the services the panel shows
+/// for it (`frames`, from `permissions.frame`) and, with
+/// `permissions.images = "any"`, pictures from any site.
+fn page_policy(frames: &[String], images: Images) -> String {
+    let frames: String = frames.iter().map(|origin| format!(" {origin}")).collect();
+    let pictures = match images {
+        Images::Own => "",
+        Images::Any => " *",
+    };
+    format!(
+        "sandbox allow-scripts allow-forms allow-downloads; \
+         default-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' data: blob:; \
+         img-src 'self' data: blob:{pictures}; frame-src 'self' data: blob:{frames}; \
+         form-action 'self'{frames}; base-uri 'self'; frame-ancestors 'self'"
+    )
+}
+
+/// Whether an app may send the browser to `location`: somewhere on this
+/// server (a relative address) or to a service it may show (`frames`).
+/// Anything else would make the cloud's address a way to other sites, the
+/// kind of link people trust (phishing).
+fn redirect_allowed(location: &str, frames: &[String]) -> bool {
+    // Browsers skip spaces around it and tabs in it, read `\` as `/`, and
+    // take `//host` for another host.
+    let path: String =
+        location.trim().chars().filter(|c| *c != '\t').map(|c| if c == '\\' { '/' } else { c }).collect();
+    let first = path.split(['/', '?', '#']).next().unwrap_or_default();
+    let relative = !path.starts_with("//") && !first.contains(':');
+    relative || frames.iter().any(|origin| path == *origin || path.starts_with(&format!("{origin}/")))
+}
 
 /// The largest body of a request without a user: anyone may send those.
 const ANONYMOUS_BODY: usize = 256 << 10;
@@ -138,6 +171,9 @@ async fn forward(
                     None => return Ok(basic_challenge()),
                 }
             }
+            // A link or form of another site: its cookie doesn't act for the
+            // user, even on GET (CSRF), whatever the app does with it.
+            None if from_another_site(&parts.headers) && !parts.headers.contains_key(header::AUTHORIZATION) => None,
             // No session is fine (the app decides); a failed check (e.g. CSRF) is not.
             None => match CurrentUser::from_request_parts(&mut parts, state).await {
                 Ok(current) => {
@@ -186,6 +222,8 @@ async fn forward(
         services.into_caller()
     });
     let user_id = caller.as_ref().and_then(|caller| Uuid::parse_str(&caller.user.id).ok());
+    let images = state.plugins.get(id).map(|app| app.permissions.images).unwrap_or_default();
+    let frames = state.plugins.frame_origins(id);
     let response = state.plugins.host().handle(id, caller, request, &config).await?;
     if let Some((_, send)) = response.headers.iter().find(|(name, _)| name.eq_ignore_ascii_case(SEND_HEADER)) {
         let target = Target::from_header(send)?;
@@ -206,7 +244,7 @@ async fn forward(
         }
         return Ok(with_app_headers(sent, &response.headers));
     }
-    Ok(from_app_response(response))
+    Ok(from_app_response(response, &frames, images))
 }
 
 /// A file sent for an app, with the headers the app may set on it
@@ -223,6 +261,14 @@ fn with_app_headers(mut sent: HttpResponse, app: &[(String, String)]) -> HttpRes
     }
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
     sent
+}
+
+/// Whether the browser says the request comes from another site (a link,
+/// a form, a picture there) rather than from the cloud's own pages or the
+/// address bar. `same-site` is another site too: a neighbouring subdomain.
+fn from_another_site(headers: &HeaderMap) -> bool {
+    let site = headers.get("sec-fetch-site").and_then(|value| value.to_str().ok());
+    matches!(site, Some("cross-site" | "same-site"))
 }
 
 /// The caller of a request with an app password. `None`: wrong credentials.
@@ -302,6 +348,11 @@ async fn token_services(state: &AppState, id: &str, token: &str) -> Result<Optio
     if user.disabled || !state.files.grant_covers(&user, id, claims.g, claims.f).await? {
         return Ok(None);
     }
+    if let Some(session) = claims.s {
+        if state.auth.session_by_id(session).await?.is_none() {
+            return Ok(None);
+        }
+    }
     tracing::Span::current().record("user", user.username.as_str());
     let mut services = services_for(&state.files, &state.jobs, &state.links, user, None, id, !claims.w);
     services.token = Some(claims);
@@ -342,7 +393,9 @@ fn to_app_request(method: &Method, uri: &Uri, headers: &HeaderMap, path: String,
     }
 }
 
-fn from_app_response(response: rustcloud_wasm_host::Response) -> HttpResponse {
+/// An app's answer as the browser gets it: with the headers it may set, and
+/// the policy of its page (`frames`, `images`: see [`page_policy`]).
+fn from_app_response(response: rustcloud_wasm_host::Response, frames: &[String], images: Images) -> HttpResponse {
     let mut http = HttpResponse::new(Body::from(response.body));
     *http.status_mut() = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let headers = http.headers_mut();
@@ -350,11 +403,18 @@ fn from_app_response(response: rustcloud_wasm_host::Response) -> HttpResponse {
         let (Ok(name), Ok(value)) = (HeaderName::try_from(name), HeaderValue::try_from(value)) else {
             continue;
         };
+        if name == header::LOCATION && !redirect_allowed(value.to_str().unwrap_or_default(), frames) {
+            continue;
+        }
         if answer_header_allowed(&name) {
             headers.append(name, value);
         }
     }
-    headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(SANDBOX));
+    // Origins in the policy are checked hosts and ports; without them, the
+    // strictest policy there is.
+    let policy = HeaderValue::try_from(page_policy(frames, images))
+        .unwrap_or(HeaderValue::from_static("sandbox; default-src 'none'"));
+    headers.insert(header::CONTENT_SECURITY_POLICY, policy);
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
     http
 }
@@ -611,6 +671,7 @@ impl UserServices for ServicesFor {
             f: file,
             w: write,
             x: chrono::Utc::now().timestamp() + i64::from(seconds),
+            s: self.session,
         };
         let token = self.links.tokens.issue(&claims)?;
         Ok(AppToken { token, expires_at: claims.expires_at().to_rfc3339() })
@@ -770,6 +831,27 @@ mod tests {
         assert!(!from_a_web_page(&headers(&[("sec-fetch-site", "none")])), "typed into the address bar");
         assert!(from_a_web_page(&headers(&[("origin", "https://evil.example")])));
         assert!(from_a_web_page(&headers(&[("sec-fetch-site", "cross-site")])));
+    }
+
+    #[test]
+    fn apps_redirect_only_within_the_server_or_to_their_services() {
+        let frames = ["https://office.example".to_owned()];
+        for local in ["/app/notes/", "edit?id=1", "../x", "?page=2", "#top"] {
+            assert!(redirect_allowed(local, &frames), "{local}");
+        }
+        assert!(redirect_allowed("https://office.example/cool/x", &frames), "a service it may show");
+        for away in [
+            "https://evil.example/",
+            "//evil.example/",
+            "/\\evil.example/",
+            "\\\\evil.example",
+            " //evil.example",
+            "/\t/evil.example",
+            "javascript:alert(1)",
+            "https://office.example.evil.example/",
+        ] {
+            assert!(!redirect_allowed(away, &frames), "{away:?}");
+        }
     }
 
     #[test]

@@ -389,6 +389,29 @@ pub struct Permissions {
     /// The administrator approves them, shown as `use.ffmpeg`.
     #[serde(default, rename = "use", skip_serializing_if = "Vec::is_empty")]
     pub uses: Vec<String>,
+    /// Where the app's page may show pictures from (since 0.2.18): this
+    /// server only, or `"any"` site. The page loads nothing else from
+    /// elsewhere: it could send the user's data out with the request.
+    #[serde(default, skip_serializing_if = "Images::is_own")]
+    pub images: Images,
+}
+
+/// Where an app's page may show pictures from, see [`Permissions::images`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Images {
+    /// This server only: the app's own files and the user's.
+    #[default]
+    Own,
+    /// Any site, e.g. pictures a Markdown note links to. A picture tells
+    /// its site who looks at it and when, and whatever its address carries.
+    Any,
+}
+
+impl Images {
+    pub fn is_own(&self) -> bool {
+        *self == Images::Own
+    }
 }
 
 /// What an app may [`use`](Permissions::uses), each through an import of its
@@ -398,7 +421,11 @@ pub const USES: [&str; 2] = ["ffmpeg", "onnx"];
 
 impl Permissions {
     pub fn is_none(&self) -> bool {
-        self.files == FileScope::None && self.network.is_empty() && self.uses.is_empty() && self.frame.is_empty()
+        self.files == FileScope::None
+            && self.network.is_empty()
+            && self.uses.is_empty()
+            && self.frame.is_empty()
+            && self.images.is_own()
     }
 
     /// The fixed rules of [`Permissions::network`]; ones from settings and
@@ -890,6 +917,17 @@ mod tests {
         assert!(Manifest::from_toml(&read_only).unwrap_err().0.contains("files_write"));
         let no_files = with("mime = [\"text/plain\"]\npage = \"/e\"").replace("files = \"folder\"", "files = \"none\"");
         assert!(Manifest::from_toml(&no_files).unwrap_err().0.contains("opened files"));
+    }
+
+    #[test]
+    fn pictures_from_any_site_are_a_permission_of_their_own() {
+        let own = Manifest::from_toml(NOTES).unwrap();
+        assert_eq!(own.permissions.images, Images::Own, "this server only, unless asked");
+        let text = NOTES.replace("files_write = true", "files_write = true\nimages = \"any\"");
+        let any = Manifest::from_toml(&text).unwrap();
+        assert_eq!(any.permissions.images, Images::Any);
+        assert_ne!(own.permissions, any.permissions, "an update that asks for it needs approval again");
+        assert!(Manifest::from_toml(&text.replace("\"any\"", "\"some\"")).is_err());
     }
 
     #[test]

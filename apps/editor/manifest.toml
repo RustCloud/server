@@ -1,7 +1,7 @@
 id = "editor"
 version = "0.1.0"
-# [[open_with]] needs 0.2.14, its `extensions` 0.2.17.
-api = "^0.2.17"
+# [[open_with]] needs 0.2.14, its `extensions` 0.2.17, `permissions.images` 0.2.18.
+api = "^0.2.18"
 
 [name]
 en = "Text editor"
@@ -13,6 +13,8 @@ ru = "Текстовый редактор"
 [permissions]
 files = "opened"
 files_write = true
+# Pictures a Markdown file links to, shown in its preview when the user asks for them.
+images = "any"
 
 [[open_with]]
 mime = [

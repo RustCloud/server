@@ -44,8 +44,16 @@ pub fn to_html(markdown: &str, external_images: bool) -> Preview {
 }
 
 /// Whether a URL points to another site (relative ones are the app's own).
+/// Read as browsers read it: they skip leading spaces and control
+/// characters, drop tabs and line breaks anywhere, and take `\` for `/`, so
+/// `/\tracker.example/p.png` is `//tracker.example/p.png`.
 fn is_external(url: &str) -> bool {
-    let url = url.trim_start().to_ascii_lowercase();
+    let url: String = url
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .map(|c| if c == '\\' { '/' } else { c.to_ascii_lowercase() })
+        .collect();
     url.starts_with("http:") || url.starts_with("https:") || url.starts_with("//")
 }
 
@@ -76,6 +84,20 @@ mod tests {
         let allowed = to_html(note, true);
         assert_eq!(allowed.blocked_images, 0);
         assert!(allowed.html.contains("<img src=\"https://tracker.example/cat.png\""), "{}", allowed.html);
+    }
+
+    #[test]
+    fn images_written_to_look_local_are_still_from_other_sites() {
+        for url in
+            ["/\\tracker.example/p.png", "\\\\tracker.example/p.png", "/\t/tracker.example/p.png", " //x.example/p"]
+        {
+            assert!(is_external(url), "{url:?}");
+        }
+        for url in ["picture.png", "/app/notes/p.png", "./a/b.png"] {
+            assert!(!is_external(url), "{url:?}");
+        }
+        let preview = to_html("![x](/\\tracker.example/p.png)", false);
+        assert_eq!(preview.blocked_images, 1, "{}", preview.html);
     }
 
     #[test]

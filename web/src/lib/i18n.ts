@@ -342,6 +342,7 @@ const en = {
   pluginNetwork: 'Network',
   pluginUses: 'Uses',
   pluginFrames: 'Shows services',
+  pluginImagesAny: 'Its page shows pictures from any site (they learn who looks)',
   pluginProxy: (paths: string[], target: string) =>
     `Shows the service ${target} at ${paths.join(', ')} of this server: it acts for users who open files in the plugin — approve only a service you trust`,
   ffmpegRuns: (version: string, layers: string) => `use.ffmpeg: ffmpeg ${version}; confined by ${layers}.`,
@@ -1024,6 +1025,7 @@ const ru: Texts = {
   pluginNetwork: 'Сеть',
   pluginUses: 'Возможности',
   pluginFrames: 'Показывает сервисы',
+  pluginImagesAny: 'Страница показывает картинки с любых сайтов (они узнают, кто смотрит)',
   pluginProxy: (paths: string[], target: string) =>
     `Показывает сервис ${target} по путям ${paths.join(', ')} этого сервера: он действует от имени пользователей, открывших в плагине файлы, — утверждайте, только если доверяете ему`,
   ffmpegRuns: (version: string, layers: string) => `use.ffmpeg: ffmpeg ${version}; защита — ${layers}.`,

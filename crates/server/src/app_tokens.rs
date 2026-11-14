@@ -7,8 +7,9 @@
 //! as the user, reaching only that file.
 //!
 //! A token is signed with a key kept in the data folder, so it outlives a
-//! restart. It works while it hasn't run out and the user's access that the
-//! app had for the file (the grant) is in force; each call keeps a session of
+//! restart. It works while it hasn't run out, the browser session it was
+//! made in lasts, and the user's access that the app had for the file (the
+//! grant) is in force; each call keeps a session of
 //! an opened file alive, as its page would.
 
 use std::path::Path;
@@ -40,6 +41,10 @@ pub struct TokenClaims {
     pub w: bool,
     /// Until when, in Unix seconds.
     pub x: i64,
+    /// The browser session it was made in, if any: logging out there (or a
+    /// new password) ends the token too, as it does the links of the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s: Option<Uuid>,
 }
 
 impl TokenClaims {
@@ -125,7 +130,7 @@ mod tests {
     use super::*;
 
     fn claims(x: i64) -> TokenClaims {
-        TokenClaims { a: "office".into(), u: Uuid::new_v4(), g: Uuid::new_v4(), f: Uuid::new_v4(), w: true, x }
+        TokenClaims { a: "office".into(), u: Uuid::new_v4(), g: Uuid::new_v4(), f: Uuid::new_v4(), w: true, x, s: None }
     }
 
     #[test]
