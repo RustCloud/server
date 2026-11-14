@@ -94,6 +94,9 @@ impl Files {
     }
 
     /// A file reached through a public link opened for the media engine.
+    /// Not one a visitor uploaded through a link: anyone could have the
+    /// engine (ffmpeg, written in C) take apart a file made to attack it,
+    /// as often as they like. The owner's own view still shows it.
     pub async fn public_open_for_media(
         &self,
         token: &str,
@@ -101,6 +104,9 @@ impl Files {
         node_id: Option<Uuid>,
     ) -> Result<(Node, std::fs::File)> {
         let file = self.public_node(token, key, node_id).await?;
+        if file.modified_by == Some(crate::shares::LINK_VISITOR) {
+            return Err(Error::not_found("NO_THUMBNAIL", "There is no thumbnail of this file"));
+        }
         self.media_file(file).await
     }
 

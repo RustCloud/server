@@ -277,7 +277,12 @@ async fn download(
 ) -> Result<Response> {
     let user = current.user();
     let node = files.get(user, id).await?;
-    content::serve(node, &headers, params.download.is_some(), |range| files.download(user, id, range)).await
+    // A PDF is shown by the browser without a sandbox, on our address: one
+    // someone else wrote (shared with the user, or put into their folder) is
+    // only downloaded, as through public links.
+    let is_pdf = node.mime_type.as_deref() == Some("application/pdf");
+    let attachment = params.download.is_some() || (is_pdf && files.from_someone_else(user, id).await?);
+    content::serve(node, &headers, attachment, |range| files.download(user, id, range)).await
 }
 
 async fn versions(

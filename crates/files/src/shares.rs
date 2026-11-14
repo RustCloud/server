@@ -19,6 +19,7 @@ use chrono::{DateTime, Utc};
 use rustcloud_auth::{hash_password, hmac_sha256, same, verify_password, User};
 use rustcloud_core::{audit, validate, ByteRange, ByteStream, Error, ErrorKind, Result};
 use rustcloud_db::{node, share};
+use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -32,6 +33,9 @@ pub(crate) const ATTEMPTS_WINDOW: Duration = Duration::from_secs(15 * 60);
 const FREE_ATTEMPTS: u32 = 10;
 /// Shortest password of a link.
 const MIN_PASSWORD: usize = 4;
+/// Who wrote a file a visitor uploaded through a public link
+/// (`nodes.modified_by`): nobody with an account.
+pub const LINK_VISITOR: Uuid = Uuid::nil();
 /// Name of the cookie that holds the key of an unlocked link.
 pub const LINK_COOKIE: &str = "rustcloud_link";
 
@@ -272,6 +276,12 @@ impl Files {
             .map(User::from)
             .ok_or_else(|| Error::not_found("SHARE_NOT_FOUND", "This link does not exist or has expired"))?;
         let (file, _) = self.put_file(&owner, &folder, &name, body, false, Writer::user()).await?;
+        // Written by a visitor, not by the owner (see `Files::from_someone_else`).
+        node::Entity::update_many()
+            .col_expr(node::Column::ModifiedBy, Expr::value(LINK_VISITOR))
+            .filter(node::Column::Id.eq(file.id))
+            .exec(&self.db)
+            .await?;
         self.emit_for(FileEventKind::Created, file.id, None).await;
         audit!("share.upload", name = file.name, size = file.size, "uploaded through a public link");
         Ok(file)

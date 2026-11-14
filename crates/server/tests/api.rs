@@ -476,6 +476,13 @@ async fn uploaded_html_is_never_rendered_on_our_origin() {
     assert!(reply.header(header::CONTENT_DISPOSITION).starts_with("attachment"));
     assert!(reply.header(header::CONTENT_SECURITY_POLICY).contains("sandbox"));
     assert_eq!(reply.header(header::X_CONTENT_TYPE_OPTIONS), "nosniff");
+
+    // A script file can't be one of our pages' scripts either (`<script src>`).
+    let script = app.upload(&cookie, &root, "evil.js", "alert(1)").await;
+    let reply =
+        app.get(&format!("/api/v1/files/{}/content", script["id"].as_str().unwrap()), As::Browser(&cookie)).await;
+    assert_eq!(reply.header(header::CONTENT_TYPE), "text/plain; charset=utf-8");
+    assert_eq!(reply.text(), "alert(1)");
 }
 
 #[tokio::test]
@@ -587,12 +594,23 @@ async fn wasm_apps_answer_under_their_prefix_in_a_sandbox() {
     let reply = app.get("/app/echo/hello", As::Browser(&alice)).await;
     assert_eq!(reply.status, StatusCode::OK);
     assert_eq!(reply.text(), "Hello, alice!");
-    assert!(reply.header(header::CONTENT_SECURITY_POLICY).starts_with("sandbox"), "never our origin");
-    assert!(reply.header(header::CONTENT_SECURITY_POLICY).contains("frame-ancestors 'self'"));
+    let policy = reply.header(header::CONTENT_SECURITY_POLICY).to_owned();
+    assert!(policy.starts_with("sandbox"), "never our origin");
+    assert!(policy.contains("frame-ancestors 'self'"));
+    // Its page sends nothing elsewhere: `network` promises only the server may.
+    assert!(policy.contains("default-src 'self' "), "{policy}");
+    assert!(policy.contains("img-src 'self' data: blob:;"), "no pictures from elsewhere: {policy}");
     assert_eq!(reply.header(header::X_FRAME_OPTIONS), "SAMEORIGIN", "the panel frames app pages");
     let api = app.get("/api/v1/auth/me", As::Browser(&alice)).await;
     assert_eq!(api.header(header::X_FRAME_OPTIONS), "DENY", "nothing else can be framed");
     assert_eq!(app.get("/app/echo/hello", As::Anonymous).await.text(), "Hello, guest!");
+    // A link on another site brings the cookie along (SameSite=Lax), but no user.
+    let cross_site = [(header::HeaderName::from_static("sec-fetch-site"), "cross-site")];
+    let reply = app.send(Method::GET, "/app/echo/hello", As::Browser(&alice), Body::empty(), &cross_site).await;
+    assert_eq!(reply.text(), "Hello, guest!", "no CSRF through GET");
+    let own_page = [(header::HeaderName::from_static("sec-fetch-site"), "same-origin")];
+    let reply = app.send(Method::GET, "/app/echo/hello", As::Browser(&alice), Body::empty(), &own_page).await;
+    assert_eq!(reply.text(), "Hello, alice!");
 
     let headers = app.get("/app/echo/headers", As::Token(&alice)).await.text();
     assert!(!headers.contains("cookie") && !headers.contains("authorization"), "no session for apps: {headers}");
@@ -868,6 +886,15 @@ async fn other_servers_reach_one_file_with_a_token_of_the_app() {
     assert_eq!(app.get(&call(&doc_id), As::Anonymous).await.status, StatusCode::UNAUTHORIZED);
     let forged = format!("/app/echo/wopi?file={doc_id}&access_token=rct1.x.y");
     assert_eq!(app.get(&forged, As::Anonymous).await.status, StatusCode::UNAUTHORIZED);
+
+    // Logging out of the session the token was made in ends it too.
+    let grant = json!({ "app_id": "echo", "node_id": doc_id, "write": true, "kind": "session" });
+    app.json(Method::POST, "/api/v1/grants", As::Browser(&alice), grant).await;
+    let token = app.get(&format!("/app/echo/token?{doc_id}:rw"), As::Browser(&alice)).await.text();
+    let call = format!("/app/echo/wopi?file={doc_id}&access_token={token}");
+    assert_eq!(app.get(&call, As::Anonymous).await.status, StatusCode::OK);
+    app.send(Method::POST, "/api/v1/auth/logout", As::Browser(&alice), Body::empty(), &[]).await;
+    assert_eq!(app.get(&call, As::Anonymous).await.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -963,6 +990,9 @@ async fn notes_are_markdown_files_in_the_folder_the_user_gave() {
         async move { app.json(method, &path, As::Browser(&alice), body).await }
     };
     assert_eq!(call(Method::GET, "/folder", json!(null)).await.json()["folder"], Value::Null);
+    let page = app.get("/app/notes/", As::Browser(&alice)).await;
+    let policy = page.header(header::CONTENT_SECURITY_POLICY);
+    assert!(policy.contains("img-src 'self' data: blob: *;"), "notes asks for pictures from anywhere: {policy}");
 
     // What the panel's dialog does when the user allows it.
     let root = app.root_id(&alice).await;
@@ -1832,6 +1862,9 @@ async fn a_service_at_the_address_the_admin_set_may_be_shown_for_the_plugin() {
     let policy = csp().await;
     assert!(policy.contains("frame-src 'self' http://127.0.0.1:9;"), "{policy}");
     assert!(policy.contains("form-action 'self' http://127.0.0.1:9"), "{policy}");
+    let page = app.get("/app/echo/hello", As::Browser(&admin)).await;
+    let page_policy = page.header(header::CONTENT_SECURITY_POLICY);
+    assert!(page_policy.contains("frame-src 'self' data: blob: http://127.0.0.1:9;"), "{page_policy}");
     let frames = app.get("/api/v1/apps", As::Browser(&admin)).await.json()["frames"]["echo"].clone();
     assert_eq!(frames, json!(["http://127.0.0.1:9"]));
     // The plugin may reach it too (nothing listens there: no answer, but no refusal).

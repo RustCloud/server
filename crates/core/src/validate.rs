@@ -25,7 +25,17 @@ pub fn file_name(name: &str) -> Result<&str> {
     if name.chars().any(|c| c == '/' || c == '\\' || c.is_control()) {
         return invalid("Name must not contain '/', '\\' or control characters");
     }
+    if name.chars().any(is_bidi_control) {
+        return invalid("Name must not contain characters that change the direction of text");
+    }
     Ok(name)
+}
+
+/// Characters that reorder how text is shown, so `invoice\u{202E}fdp.exe`
+/// would look like `invoiceexe.pdf`. (Other invisible format characters,
+/// such as the joiner inside emoji, stay allowed.)
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// Checks a username and returns it lower-cased.
@@ -74,7 +84,8 @@ mod tests {
 
     #[test]
     fn accepts_ordinary_file_names() {
-        for name in ["report.pdf", "Фото 2024", " leading space", "a", "emoji 🎉.txt"] {
+        for name in ["report.pdf", "Фото 2024", " leading space", "a", "emoji 🎉.txt", "family 👨\u{200D}👩\u{200D}👧"]
+        {
             assert_eq!(file_name(name).unwrap(), name);
         }
     }
@@ -82,7 +93,9 @@ mod tests {
     #[test]
     fn rejects_dangerous_file_names() {
         let too_long = "x".repeat(MAX_NAME_BYTES + 1);
-        for name in ["", ".", "..", "a/b", "a\\b", "nul\0byte", "tab\tname", too_long.as_str()] {
+        let reversed = "invoice\u{202E}fdp.exe";
+        for name in ["", ".", "..", "a/b", "a\\b", "nul\0byte", "tab\tname", reversed, "x\u{2067}y", too_long.as_str()]
+        {
             let err = file_name(name).unwrap_err();
             assert_eq!(err.code, "INVALID_NAME", "{name:?} should be rejected");
         }

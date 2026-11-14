@@ -79,7 +79,7 @@ pub use accounts::AccountBlobs;
 pub use app::{manifest, FILES_INTERFACE_VERSION};
 pub use app_shares::{AppShare, AppShares, NewAppShare, Person};
 pub use appdata::APPDATA_FOLDER;
-pub use archive::{ZipDownload, ZIP_MAX_ENTRIES};
+pub use archive::{ZipDownload, ZIP_AT_ONCE, ZIP_MAX_ENTRIES};
 pub use changes::{
     Change, ChangeKind, ChangePage, ChangeWatch, CHANGES_AT_ONCE, HINT_EVERY, KEEP_DAYS, MAX_WATCHERS, WATCH_TIME,
 };

@@ -384,6 +384,7 @@ async fn search_is_case_insensitive_and_treats_wildcards_literally() {
     assert_eq!(names(s.files.search(&s.alice, "%").await.unwrap()), ["100% done.txt"]);
     assert_eq!(names(s.files.search(&s.alice, "t_f").await.unwrap()), ["report_final.doc"]);
     assert!(s.files.search(&s.alice, "  ").await.unwrap().is_empty());
+    assert!(s.files.search(&s.alice, "re\0port").await.unwrap().is_empty(), "no error, PostgreSQL included");
 }
 
 #[tokio::test]
@@ -445,6 +446,33 @@ async fn only_the_owner_makes_public_links_and_only_the_owners_open() {
     assert_eq!(s.files.public_view(token, None, None).await.unwrap_err().code, "SHARE_NOT_FOUND");
     let upload = s.files.public_upload(token, None, None, "x.txt", body("x")).await;
     assert_eq!(code_of(upload), "SHARE_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn files_tell_whether_someone_else_wrote_them() {
+    let s = setup().await;
+    let root = s.files.root(&s.alice).await.unwrap();
+    let own = s.files.upload(&s.alice, root.id, "own.pdf", body("%PDF"), false, None).await.unwrap();
+    assert!(!s.files.from_someone_else(&s.alice, own.id).await.unwrap());
+
+    let shared = s.files.create_folder(&s.alice, root.id, "Shared").await.unwrap();
+    let access = NewAccess { username: Some("bob".into()), group_id: None, write: true };
+    s.files.grant_access(&s.alice, shared.id, access).await.unwrap();
+    let alices = s.files.upload(&s.alice, shared.id, "alices.pdf", body("%PDF"), false, None).await.unwrap();
+    assert!(s.files.from_someone_else(&s.bob, alices.id).await.unwrap(), "shared with bob: alice's");
+    let bobs = s.files.upload(&s.bob, shared.id, "bobs.pdf", body("%PDF"), false, None).await.unwrap();
+    assert!(s.files.from_someone_else(&s.alice, bobs.id).await.unwrap(), "in alice's folder, but bob's");
+
+    let options = ShareOptions { allow_upload: Some(true), ..Default::default() };
+    let link = s.files.create_share(&s.alice, shared.id, options).await.unwrap();
+    let dropped = s.files.public_upload(&link.token, None, None, "dropped.pdf", body("%PDF")).await.unwrap();
+    assert!(s.files.from_someone_else(&s.alice, dropped.id).await.unwrap(), "a visitor's");
+
+    // Visitors don't get the media engine to take apart what they uploaded.
+    let refused = s.files.public_open_for_media(&link.token, None, Some(dropped.id)).await;
+    assert_eq!(refused.err().map(|err| err.code), Some("NO_THUMBNAIL"));
+    assert!(s.files.public_open_for_media(&link.token, None, Some(alices.id)).await.is_ok());
+    assert!(s.files.open_for_media(&s.alice, dropped.id).await.is_ok(), "the owner still sees it");
 }
 
 #[tokio::test]
@@ -1305,4 +1333,28 @@ async fn abandoned_uploads_in_parts_go() {
     assert_eq!(s.files.purge_uploads().await.unwrap(), 1);
     assert_eq!(code_of(s.files.upload_info(&s.alice, sessions[0].id).await), "UPLOAD_NOT_FOUND");
     assert_eq!(blob_count(s.blob_dir.path()), 0, "its part went with it");
+}
+
+#[tokio::test]
+async fn only_a_few_folders_are_zipped_at_once() {
+    let s = setup().await;
+    let files = Arc::new(s.files);
+    let root = files.root(&s.alice).await.unwrap();
+    let folder = files.create_folder(&s.alice, root.id, "Big").await.unwrap();
+    // Larger than the pipe to the client: an archive nobody reads keeps its place.
+    let big: ByteStream = Box::pin(stream::once(async { Ok(Bytes::from(vec![7u8; 1 << 20])) }));
+    files.upload(&s.alice, folder.id, "big.bin", big, false, None).await.unwrap();
+
+    let mut unread = Vec::new();
+    for _ in 0..rustcloud_files::ZIP_AT_ONCE {
+        unread.push(files.download_zip(&s.alice, folder.id).await.unwrap());
+    }
+    let busy = files.download_zip(&s.alice, folder.id).await;
+    assert_eq!(busy.err().map(|err| err.code), Some("SERVER_BUSY"));
+
+    // A client that reads to the end gives its place back.
+    let done: Vec<Bytes> = unread.pop().unwrap().body.map(|chunk| chunk.unwrap()).collect().await;
+    assert!(done.iter().map(Bytes::len).sum::<usize>() > 1 << 20);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(files.download_zip(&s.alice, folder.id).await.is_ok());
 }

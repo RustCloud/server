@@ -113,7 +113,11 @@ where
             "sandbox; default-src 'none'; img-src 'self'; media-src 'self'".into(),
         );
     }
-    set(&mut headers, header::CONTENT_TYPE, mime);
+    // A page of ours could still run a script file through `<script src>`
+    // (a download doesn't stop that), and our pages may load scripts from
+    // our own address: as plain text, `nosniff` keeps it from running.
+    let served_type = if is_script(&mime) { "text/plain; charset=utf-8".to_owned() } else { mime };
+    set(&mut headers, header::CONTENT_TYPE, served_type);
     set(&mut headers, header::ACCEPT_RANGES, "bytes".into());
     set(&mut headers, header::CACHE_CONTROL, "private, no-cache".into());
     if let Some(etag) = etag {
@@ -150,6 +154,15 @@ fn is_safe_inline(mime: &str) -> bool {
             | "application/pdf"
     ) || mime.starts_with("video/")
         || mime.starts_with("audio/")
+}
+
+/// Types browsers run as JavaScript (the MIME Sniffing standard's list:
+/// `text/javascript`, `application/x-ecmascript`, `text/jscript`…).
+fn is_script(mime: &str) -> bool {
+    let essence = mime.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    let (kind, subtype) = essence.split_once('/').unwrap_or_default();
+    matches!(kind, "text" | "application")
+        && ["javascript", "ecmascript", "jscript", "livescript"].iter().any(|name| subtype.contains(name))
 }
 
 /// `Content-Disposition` with an ASCII fallback name and the exact UTF-8 name (RFC 6266).
@@ -222,6 +235,16 @@ mod tests {
         assert!(!is_safe_inline("text/html"));
         assert!(!is_safe_inline("image/svg+xml"));
         assert!(!is_safe_inline("application/javascript"));
+    }
+
+    #[test]
+    fn script_files_are_sent_as_text_that_never_runs() {
+        for script in ["text/javascript", "application/javascript", "application/x-ecmascript", "text/jscript; x=1"] {
+            assert!(is_script(script), "{script}");
+        }
+        for other in ["text/plain", "application/json", "text/css", "image/png", "application/wasm"] {
+            assert!(!is_script(other), "{other}");
+        }
     }
 
     #[test]

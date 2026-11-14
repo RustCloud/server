@@ -515,7 +515,8 @@ async fn only_emails_someone_vouched_for_count_as_verified() {
     let set = AccountUpdate { email: Some("bob@corp.example".into()), ..Default::default() };
     let bob = auth.update_account(&admin, bob.id, set).await.unwrap();
     assert_eq!((bob.email.as_deref(), bob.email_verified), (Some("bob@corp.example"), true));
-    let removed = auth.update_account(&admin, bob.id, AccountUpdate { email: Some(String::new()), ..Default::default() });
+    let removed =
+        auth.update_account(&admin, bob.id, AccountUpdate { email: Some(String::new()), ..Default::default() });
     let bob = removed.await.unwrap();
     assert_eq!((bob.email, bob.email_verified), (None, false));
 }

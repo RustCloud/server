@@ -164,6 +164,8 @@ pub struct Files {
     pub(crate) watchers: Arc<Watchers>,
     /// Wrong passwords of public links, per link.
     pub(crate) link_attempts: rustcloud_auth::AttemptLimiter,
+    /// Places for zip archives being written (see `archive.rs`).
+    pub(crate) zips: Arc<tokio::sync::Semaphore>,
 }
 
 /// The uploads of one user under way.
@@ -193,6 +195,7 @@ impl Files {
             hints: tokio::sync::broadcast::channel(HINT_BACKLOG).0,
             watchers: Arc::default(),
             link_attempts: rustcloud_auth::AttemptLimiter::new(crate::shares::ATTEMPTS_WINDOW),
+            zips: Arc::new(tokio::sync::Semaphore::new(crate::archive::ZIP_AT_ONCE)),
         }
     }
 
@@ -376,6 +379,15 @@ impl Files {
         self.open(file, range).await
     }
 
+    /// Whether someone other than `user` wrote the file: it is shared with
+    /// them, or another user (or a public link) put it into their folder.
+    /// Such content is a stranger's: what a browser would show on our
+    /// address without a sandbox (PDF) is only downloaded.
+    pub async fn from_someone_else(&self, user: &User, id: Uuid) -> Result<bool> {
+        let file = self.readable(user, id).await?;
+        Ok(file.owner_id != user.id || file.modified_by.is_some_and(|writer| writer != user.id))
+    }
+
     /// Renames and/or moves a node.
     pub async fn update(&self, user: &User, id: Uuid, update: NodeUpdate) -> Result<Node> {
         let _moving = match update.parent_id {
@@ -519,7 +531,8 @@ impl Files {
     /// Files and folders of the user whose name contains `query` (case-insensitive).
     pub async fn search(&self, user: &User, query: &str) -> Result<Vec<Node>> {
         let query = query.trim();
-        if query.is_empty() {
+        // Names never hold control characters, and PostgreSQL refuses NUL in text.
+        if query.is_empty() || query.chars().any(char::is_control) {
             return Ok(Vec::new());
         }
         let escaped = query.to_lowercase().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");

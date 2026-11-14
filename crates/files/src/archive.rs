@@ -9,11 +9,13 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use rustcloud_auth::User;
-use rustcloud_core::{audit, ByteStream, Error, Result};
+use rustcloud_core::{audit, ByteStream, Error, ErrorKind, Result};
 use rustcloud_db::node;
+use tokio::io::{AsyncWriteExt, DuplexStream};
 use tokio::runtime::Handle;
 use tokio_util::io::{ReaderStream, StreamReader, SyncIoBridge};
 use uuid::Uuid;
@@ -25,6 +27,11 @@ use crate::trash::TRASH_FOLDER;
 
 /// Bytes on their way between the writer of the archive and the client.
 const PIPE: usize = 256 << 10;
+/// Archives written at once, for everyone: each holds a thread of its own
+/// while the client reads it.
+pub const ZIP_AT_ONCE: usize = 16;
+/// How long the client may stop reading before its archive is given up.
+const STALL_LIMIT: Duration = Duration::from_secs(60);
 /// Most files and folders in one archive.
 pub const ZIP_MAX_ENTRIES: usize = 100_000;
 
@@ -60,6 +67,10 @@ impl Files {
         if !folder.is_dir {
             return Err(Error::bad_request("NOT_A_FOLDER", "Only folders are downloaded as archives"));
         }
+        let Ok(place) = self.zips.clone().try_acquire_owned() else {
+            let message = "Too many folders are being downloaded, try again in a moment";
+            return Err(Error::new(ErrorKind::TooManyRequests, "SERVER_BUSY", message));
+        };
         let entries = archive_entries(&folder, self.subtree(&folder).await?)?;
         let name = if folder.parent_id.is_none() { "files.zip".to_owned() } else { format!("{}.zip", folder.name) };
         let files = entries.iter().filter(|(_, node)| !node.is_dir).count();
@@ -70,13 +81,39 @@ impl Files {
         let this = self.clone();
         let handle = Handle::current();
         tokio::task::spawn_blocking(move || {
-            // The client went away, or a file could not be read: the archive
-            // just ends, and the client sees it broken.
-            if let Err(err) = write_archive(&this, &handle, entries, SyncIoBridge::new(writer)) {
+            let _place = place;
+            // The client went away or stopped reading, or a file could not be
+            // read: the archive just ends, and the client sees it broken.
+            let out = StallLimited { writer, handle: handle.clone() };
+            if let Err(err) = write_archive(&this, &handle, entries, out) {
                 tracing::debug!("zip archive ended early: {err}");
             }
         });
         Ok(ZipDownload { name, body: Box::pin(ReaderStream::new(reader)) })
+    }
+}
+
+/// The pipe to the client, written from a blocking thread; a write the
+/// client doesn't make room for within [`STALL_LIMIT`] fails, so a client
+/// that stops reading doesn't hold the thread for good.
+struct StallLimited {
+    writer: DuplexStream,
+    handle: Handle,
+}
+
+impl Write for StallLimited {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        let write = tokio::time::timeout(STALL_LIMIT, self.writer.write(data));
+        self.handle
+            .block_on(write)
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the client stopped reading"))?
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let flush = tokio::time::timeout(STALL_LIMIT, self.writer.flush());
+        self.handle
+            .block_on(flush)
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the client stopped reading"))?
     }
 }
 
