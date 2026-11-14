@@ -38,6 +38,10 @@ pub struct User {
     pub username: String,
     pub display_name: String,
     pub email: Option<String>,
+    /// The email is known to be theirs: an administrator set it or a login
+    /// service confirmed it. Only such an email lets a login service with
+    /// `link_by_email` take the account.
+    pub email_verified: bool,
     pub is_admin: bool,
     pub disabled: bool,
     pub quota_bytes: Option<i64>,
@@ -51,6 +55,7 @@ impl From<user::Model> for User {
             username: row.username,
             display_name: row.display_name,
             email: row.email,
+            email_verified: row.email_verified,
             is_admin: row.is_admin,
             disabled: row.disabled,
             quota_bytes: row.quota_bytes,
@@ -86,6 +91,8 @@ pub struct AccountUpdate {
     #[serde(default, deserialize_with = "deserialize_some")]
     pub quota_bytes: Option<Option<i64>>,
     pub password: Option<String>,
+    /// The account's email, vouched for by the administrator; `""` removes it.
+    pub email: Option<String>,
 }
 
 /// What a client needs before login: which forms to show.
@@ -172,7 +179,8 @@ impl Auth {
         if !is_first && !self.settings.read(|s| s.open_registration) {
             return Err(Error::forbidden("Registration is closed").with_code("REGISTRATION_CLOSED"));
         }
-        self.create_user(account, is_first).await
+        // An address people give for themselves is only what they say.
+        self.insert_account(account, is_first, false).await
     }
 
     /// Creates the first administrator, if there are no accounts yet (from
@@ -186,8 +194,15 @@ impl Auth {
         self.create_user(account, true).await.map(Some)
     }
 
-    /// Creates an account with a password (used by registration and by admins).
+    /// Creates an account with a password for an administrator, who vouches
+    /// for its email (see [`User::email_verified`]).
     pub async fn create_user(&self, account: NewAccount, is_admin: bool) -> Result<User> {
+        self.insert_account(account, is_admin, true).await
+    }
+
+    /// Creates an account with a password; `email_verified`: whoever gave
+    /// the email vouches for it.
+    async fn insert_account(&self, account: NewAccount, is_admin: bool, email_verified: bool) -> Result<User> {
         let username = validate::username(&account.username)?;
         validate::password(&account.password)?;
         let display_name = clean_display_name(account.display_name.as_deref())?.unwrap_or_else(|| username.clone());
@@ -198,6 +213,7 @@ impl Auth {
             id: Set(Uuid::new_v4()),
             username: Set(username.clone()),
             display_name: Set(display_name),
+            email_verified: Set(email_verified && email.is_some()),
             email: Set(email),
             is_admin: Set(is_admin),
             disabled: Set(false),
@@ -391,6 +407,8 @@ impl Auth {
         }
         if let Some(email) = update.email.as_deref() {
             row.email = Set(clean_email(Some(email))?);
+            // Nobody vouches for an address users type in themselves.
+            row.email_verified = Set(false);
         }
         Ok(row.update(&self.db).await?.into())
     }
@@ -476,6 +494,11 @@ impl Auth {
         if let Some(quota) = update.quota_bytes {
             row.quota_bytes = Set(quota);
         }
+        if let Some(email) = update.email.as_deref() {
+            let email = clean_email(Some(email))?;
+            row.email_verified = Set(email.is_some());
+            row.email = Set(email);
+        }
 
         let txn = self.db.begin().await?;
         let updated = row.update(&txn).await?;
@@ -484,6 +507,11 @@ impl Auth {
         }
         if update.disabled == Some(true) || update.password.is_some() {
             session::Entity::delete_many().filter(session::Column::UserId.eq(user_id)).exec(&txn).await?;
+        }
+        // A new password from the administrator usually follows a break-in:
+        // whoever got in may have made app passwords (WebDAV, CalDAV) too.
+        if update.password.is_some() {
+            app_password::Entity::delete_many().filter(app_password::Column::UserId.eq(user_id)).exec(&txn).await?;
         }
         txn.commit().await?;
         // Only the changed fields are recorded (`None` leaves a field out).
@@ -495,6 +523,7 @@ impl Auth {
             disabled = update.disabled,
             quota_bytes = quota.as_deref(),
             password_reset = update.password.is_some().then_some(true),
+            email = update.email.as_deref(),
             "account changed"
         );
         Ok(updated.into())

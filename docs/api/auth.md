@@ -6,10 +6,14 @@
 
 ```json
 {
-  "id": "…", "username": "alice", "display_name": "Alice", "email": null,
+  "id": "…", "username": "alice", "display_name": "Alice", "email": null, "email_verified": false,
   "is_admin": false, "disabled": false, "quota_bytes": null, "created_at": "…"
 }
 ```
+
+`email_verified` — почту задал администратор или подтвердил сервис входа; только такая почта
+позволяет сервису входа с `link_by_email` найти аккаунт ([первый вход](#вход-через-сервисы-oidc)).
+Пользователь, сменивший почту сам, теряет подтверждение.
 
 ## Состояние
 
@@ -135,7 +139,7 @@
 | Запрос                          | Тело                                      | Ответ  |
 |---------------------------------|-------------------------------------------|--------|
 | `GET /api/v1/auth/me`           | —                                         | `User` |
-| `PATCH /api/v1/auth/me`         | `{display_name?, email?}`; `""` удаляет email | `User` |
+| `PATCH /api/v1/auth/me`         | `{display_name?, email?}`; `""` удаляет email, новая почта не подтверждена | `User` |
 | `POST /api/v1/auth/password`    | `{current_password, new_password, revoke_app_passwords?}` | `204`  |
 
 Смена пароля завершает все остальные сессии пользователя; с `revoke_app_passwords: true` отзывает
@@ -167,7 +171,13 @@
 **Первый вход** того, кого сервер ещё не знает:
 
 1. С включённым `link_by_email` и почтой, которую сервис отметил подтверждённой
-   (`email_verified: true`), — аккаунт с той же почтой, если он ровно один.
+   (`email_verified: true`), — аккаунт с той же **подтверждённой** почтой
+   (`User.email_verified`), если он ровно один. Подтверждённая — та, что задал администратор
+   (при создании аккаунта или `PATCH /api/v1/admin/users/{id} {"email": …}`), или пришедшая
+   подтверждённой от сервиса входа при создании аккаунта. Почта, которую пользователь указал сам
+   (регистрация, `PATCH /api/v1/auth/me`), не считается: иначе любой вписал бы себе адрес
+   администратора и получил бы его первый вход вместе с правами. У аккаунтов, созданных до
+   2026-11-14, почта не подтверждена — администратор подтверждает её на вкладке «Пользователи».
 2. Иначе с `auto_create` — новый аккаунт: имя из `preferred_username`, почты или имени,
    приведённое к правилам имён; занятое получает `-2`, `-3`… Пароля у аккаунта нет.
 3. Иначе — `NO_ACCOUNT`.
@@ -232,7 +242,7 @@
 |--------------------------------------|--------------------------------------------------------------|--------------|
 | `GET /api/v1/admin/users`            | —                                                            | `[User]`     |
 | `POST /api/v1/admin/users`           | `{username, password, display_name?, email?, is_admin?}`     | `201 User`   |
-| `PATCH /api/v1/admin/users/{id}`     | `{display_name?, is_admin?, disabled?, quota_bytes?, password?}` | `User`   |
+| `PATCH /api/v1/admin/users/{id}`     | `{display_name?, is_admin?, disabled?, quota_bytes?, password?, email?}` | `User` |
 | `DELETE /api/v1/admin/users/{id}`    | —                                                            | `204`        |
 
 - `quota_bytes: null` снимает квоту.

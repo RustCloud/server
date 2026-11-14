@@ -30,6 +30,7 @@ impl MigratorTrait for Migrator {
             Box::new(UnmatchedAppShares),
             Box::new(ShareOptions),
             Box::new(Groups),
+            Box::new(EmailVerified),
         ]
     }
 }
@@ -814,4 +815,25 @@ async fn create_index(
         index.unique();
     }
     manager.create_index(index.to_owned()).await
+}
+
+/// Whether an account's email is known to be its owner's
+/// (`users.email_verified`): set by an administrator or confirmed by a
+/// login service. Only such addresses let a login service take the account
+/// by email; one users typed in themselves could be anyone's.
+struct EmailVerified;
+
+impl MigrationName for EmailVerified {
+    fn name(&self) -> &str {
+        "m0021_email_verified"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for EmailVerified {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Nobody knows who typed the addresses there already: none counts.
+        let column = boolean("email_verified").default(false).to_owned();
+        manager.alter_table(Table::alter().table("users").add_column(column).to_owned()).await
+    }
 }

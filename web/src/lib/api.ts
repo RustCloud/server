@@ -8,6 +8,8 @@ export interface User {
   username: string;
   display_name: string;
   email: string | null;
+  /** An administrator set the email or a login service confirmed it. */
+  email_verified: boolean;
   is_admin: boolean;
   disabled: boolean;
   quota_bytes: number | null;
@@ -466,6 +468,8 @@ export interface AccountUpdate {
   disabled?: boolean;
   quota_bytes?: number | null;
   password?: string;
+  /** Set by the administrator, so it counts as verified; `''` removes it. */
+  email?: string;
 }
 
 export interface SettingsField {

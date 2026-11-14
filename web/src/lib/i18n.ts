@@ -78,7 +78,7 @@ const en = {
     auto_create: ['Create accounts automatically', 'On the first login of someone who has no account here.'],
     link_by_email: [
       'Find existing accounts by email',
-      'On the first login, the account with the same email, if the service says the email is verified.',
+      'On the first login, the account with the same email, if the service says the email is verified and an administrator set or confirmed it on the account (the users page). An email users typed in themselves never counts.',
     ],
     groups_claim: ['Groups claim', 'Where the service puts groups: groups, roles, realm_access.roles…'],
     user_groups: ['Who may log in', 'Groups, one per line. Empty: everyone the service lets in.'],
@@ -444,6 +444,10 @@ const en = {
   deleteAccountConfirm: (name: string) =>
     `Delete the account ${name} with all its files? This cannot be undone. Type the username to confirm:`,
   newPasswordFor: (name: string) => `New password for ${name}:`,
+  emailVerifiedHint: 'Set by an administrator or confirmed by a login service',
+  emailUnverifiedHint:
+    'Typed in by the user: a login service with "link by email" does not take this account. Confirm it if you know it is theirs.',
+  confirmEmail: 'Confirm',
   you: 'you',
 
   // Administration → storage
@@ -763,7 +767,7 @@ const ru: Texts = {
     auto_create: ['Создавать аккаунты автоматически', 'При первом входе того, у кого здесь нет аккаунта.'],
     link_by_email: [
       'Находить аккаунты по email',
-      'При первом входе — аккаунт с той же почтой, если сервис отметил её как подтверждённую.',
+      'При первом входе — аккаунт с той же почтой, если сервис отметил её как подтверждённую, а у аккаунта её задал или подтвердил администратор (вкладка «Пользователи»). Почта, которую пользователь вписал сам, не считается.',
     ],
     groups_claim: ['Поле с группами', 'Где сервис передаёт группы: groups, roles, realm_access.roles…'],
     user_groups: ['Кому можно входить', 'Группы, по одной в строке. Пусто — всем, кого пускает сервис.'],
@@ -1122,6 +1126,10 @@ const ru: Texts = {
   deleteAccountConfirm: (name: string) =>
     `Удалить аккаунт ${name} вместе со всеми файлами? Отменить нельзя. Введите имя пользователя для подтверждения:`,
   newPasswordFor: (name: string) => `Новый пароль для ${name}:`,
+  emailVerifiedHint: 'Задана администратором или подтверждена сервисом входа',
+  emailUnverifiedHint:
+    'Указана самим пользователем: вход через сервис с «привязкой по почте» этот аккаунт не возьмёт. Подтвердите, если знаете, что почта его.',
+  confirmEmail: 'Подтвердить',
   you: 'вы',
 
   storageTitle: 'Хранилище',

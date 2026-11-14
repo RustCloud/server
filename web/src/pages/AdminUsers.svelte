@@ -78,6 +78,7 @@
       <tr>
         <th>{t.username}</th>
         <th>{t.displayName}</th>
+        <th>{t.email}</th>
         <th>{t.isAdmin}</th>
         <th>{t.disabled}</th>
         <th>{t.quotaMib}</th>
@@ -91,6 +92,27 @@
         <tr>
           <td>{user.username}{#if isSelf}<span class="muted small"> ({t.you})</span>{/if}</td>
           <td>{user.display_name}</td>
+          <td>
+            <div class="inline">
+              <input
+                class="email"
+                type="email"
+                value={user.email ?? ''}
+                onchange={(e) => update(user, { email: e.currentTarget.value.trim() })}
+                aria-label={t.email}
+              />
+              {#if user.email && user.email_verified}
+                <span class="muted small" title={t.emailVerifiedHint}>✓</span>
+              {:else if user.email}
+                <button
+                  type="button"
+                  class="small"
+                  title={t.emailUnverifiedHint}
+                  onclick={() => update(user, { email: user.email ?? '' })}>{t.confirmEmail}</button
+                >
+              {/if}
+            </div>
+          </td>
           <td>
             <input
               type="checkbox"
@@ -170,6 +192,9 @@
   }
   .quota {
     width: 110px;
+  }
+  .email {
+    width: 200px;
   }
   .new-user {
     margin-top: 24px;

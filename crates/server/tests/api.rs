@@ -2490,6 +2490,25 @@ async fn users_log_in_through_an_openid_connect_service() {
     let session = oidc_login(&app, &idp, "id-bob", verified).await.cookie("rustcloud_session").unwrap();
     assert_eq!(app.get("/api/v1/auth/me", As::Browser(&session)).await.json()["username"], "bob");
 
+    // An email someone typed into their own profile takes no login: mallory
+    // can't catch the first login of the boss (an administrator by group).
+    let mallory = json!({ "username": "mallory", "password": "password123" });
+    app.json(Method::POST, "/api/v1/admin/users", As::Browser(&admin), mallory).await;
+    let login = json!({ "username": "mallory", "password": "password123" });
+    let mallory = app.json(Method::POST, "/api/v1/auth/login", As::Anonymous, login).await.json();
+    let mallory = mallory["token"].as_str().unwrap().to_owned();
+    let own_email = json!({ "email": "boss@corp.example" });
+    let me = app.json(Method::PATCH, "/api/v1/auth/me", As::Token(&mallory), own_email).await.json();
+    assert_eq!((me["email"].as_str(), me["email_verified"].as_bool()), (Some("boss@corp.example"), Some(false)));
+    let boss = json!({ "email": "boss@corp.example", "email_verified": true, "groups": ["admins"] });
+    let reply = oidc_login(&app, &idp, "id-boss-first", boss).await;
+    assert_eq!(reply.header(header::LOCATION), "/#/login?oidc_error=NO_ACCOUNT");
+    let me = app.get("/api/v1/auth/me", As::Token(&mallory)).await.json();
+    assert_eq!(me["is_admin"], false, "mallory got neither the login nor the rights");
+    // Bob changing his email himself loses what the administrator vouched for.
+    let bob_me = app.json(Method::PATCH, "/api/v1/auth/me", As::Browser(&session), json!({ "email": "b@x.example" }));
+    assert_eq!(bob_me.await.json()["email_verified"], false);
+
     // Users add the service to their account from the settings and remove it again.
     let link = app.json(Method::POST, "/api/v1/auth/oidc/corp/link", As::Browser(&admin), json!({})).await;
     assert_eq!(link.status, StatusCode::OK, "{}", link.text());
@@ -2962,6 +2981,9 @@ async fn folders_are_shared_with_users_and_groups() {
     assert_eq!(app.get(&format!("/api/v1/files/{trip}"), As::Browser(&carol)).await.status, StatusCode::NOT_FOUND);
     let not_owner = app.get(&access, As::Browser(&bob)).await;
     assert_eq!(not_owner.status, StatusCode::NOT_FOUND, "only the owner sees whom it is shared with");
+    let link = json!({ "node_id": trip, "allow_upload": true });
+    let relinked = app.json(Method::POST, "/api/v1/shares", As::Browser(&bob), link.clone()).await;
+    assert_eq!(relinked.status, StatusCode::NOT_FOUND, "bob makes no public link to alice's folder");
 
     // For changes: bob's writes are alice's files, in her quota.
     let uri = format!("/api/v1/access/{given_id}");
@@ -2977,6 +2999,8 @@ async fn folders_are_shared_with_users_and_groups() {
     let rename = format!("/api/v1/files/{added_id}");
     let renamed = app.json(Method::PATCH, &rename, As::Browser(&bob), json!({ "name": "notes.txt" })).await;
     assert_eq!(renamed.json()["name"], "notes.txt");
+    let relinked = app.json(Method::POST, "/api/v1/shares", As::Browser(&bob), link).await;
+    assert_eq!(relinked.status, StatusCode::NOT_FOUND, "not with changes either");
     // The shared folder itself is alice's to rename, move or delete.
     let top = format!("/api/v1/files/{trip}");
     let rename_top = app.json(Method::PATCH, &top, As::Browser(&bob), json!({ "name": "Mine" })).await;

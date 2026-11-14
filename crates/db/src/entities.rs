@@ -16,6 +16,9 @@ pub mod user {
         pub username: String,
         pub display_name: String,
         pub email: Option<String>,
+        /// `email` is known to be theirs: an administrator set it, or a login
+        /// service confirmed it. Users who change it themselves lose this.
+        pub email_verified: bool,
         pub is_admin: bool,
         /// Disabled users cannot log in; their sessions stop working.
         pub disabled: bool,

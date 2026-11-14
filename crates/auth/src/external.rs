@@ -33,8 +33,9 @@ pub struct ExternalLogin {
     pub email_verified: bool,
     /// Create an account for someone unknown.
     pub auto_create: bool,
-    /// Take the account with the same email, if the email is verified and
-    /// exactly one account has it.
+    /// Take the account with the same email, if the service verified the
+    /// email and exactly one account has it as a verified one
+    /// ([`User::email_verified`](crate::User::email_verified)).
     pub link_by_email: bool,
     /// `Some` when the service decides administrator rights (by groups).
     pub admin: Option<bool>,
@@ -150,8 +151,11 @@ impl Auth {
 
         if let Some(email) = email.as_deref().filter(|_| login.link_by_email && login.email_verified) {
             let lower = Func::lower(Expr::col(user::Column::Email));
+            // Only an address someone vouched for: anyone may type the
+            // administrator's email into their own profile.
             let owners = user::Entity::find()
                 .filter(Expr::expr(lower).eq(email.to_lowercase()))
+                .filter(user::Column::EmailVerified.eq(true))
                 // Two are enough to tell "exactly one" from "several".
                 .limit(2)
                 .all(&self.db)
@@ -173,6 +177,7 @@ impl Auth {
             id: Set(Uuid::new_v4()),
             username: Set(username.clone()),
             display_name: Set(display_name.unwrap_or_else(|| username.clone())),
+            email_verified: Set(login.email_verified && email.is_some()),
             email: Set(email),
             is_admin: Set(false),
             disabled: Set(false),

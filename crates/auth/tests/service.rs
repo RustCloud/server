@@ -180,12 +180,15 @@ async fn admin_can_reset_a_password_and_set_a_quota() {
     let (_db, auth) = auth().await;
     let admin = auth.create_user(account("admin"), true).await.unwrap();
     let alice = auth.create_user(account("alice"), false).await.unwrap();
+    let intruders = auth.create_app_password(&alice, calendar_password(Access::Write)).await.unwrap();
 
     let update =
         AccountUpdate { password: Some("reset-by-admin".into()), quota_bytes: Some(Some(1024)), ..Default::default() };
     let updated = auth.update_account(&admin, alice.id, update).await.unwrap();
     assert_eq!(updated.quota_bytes, Some(1024));
     assert!(auth.login("password", "alice", "reset-by-admin", None).await.is_ok());
+    let found = auth.app_password_user("alice", &intruders.password, None).await.unwrap();
+    assert!(found.is_none(), "a reset by the administrator revokes app passwords too");
 
     let remove_quota = AccountUpdate { quota_bytes: Some(None), ..Default::default() };
     let updated = auth.update_account(&admin, alice.id, remove_quota).await.unwrap();
@@ -491,4 +494,28 @@ async fn ending_a_session_or_the_browser_one_stops_the_device() {
     let code = auth.authorize(&browser, &request(&challenge)).unwrap();
     auth.logout(browser.session_id).await.unwrap();
     assert!(auth.exchange_code(&code, &verifier, REDIRECT, None).await.is_err());
+}
+
+#[tokio::test]
+async fn only_emails_someone_vouched_for_count_as_verified() {
+    let (_db, auth) = auth_with(AccountSettings { open_registration: true, ..Default::default() }).await;
+    let with_email = |name: &str| NewAccount { email: Some(format!("{name}@corp.example")), ..account(name) };
+    let admin = auth.create_user(with_email("admin"), true).await.unwrap();
+    assert!(admin.email_verified, "an administrator vouches for the email of an account they make");
+    let self_made = auth.register(with_email("mallory")).await.unwrap();
+    assert!(!self_made.email_verified, "an email people give for themselves is only what they say");
+
+    let typed = ProfileUpdate { email: Some("boss@corp.example".into()), ..Default::default() };
+    let mallory = auth.update_profile(self_made.id, typed).await.unwrap();
+    assert!(!mallory.email_verified);
+    let bob = auth.create_user(with_email("bob"), false).await.unwrap();
+    let typed = ProfileUpdate { email: Some("bob@home.example".into()), ..Default::default() };
+    assert!(!auth.update_profile(bob.id, typed).await.unwrap().email_verified, "changing it oneself loses it");
+
+    let set = AccountUpdate { email: Some("bob@corp.example".into()), ..Default::default() };
+    let bob = auth.update_account(&admin, bob.id, set).await.unwrap();
+    assert_eq!((bob.email.as_deref(), bob.email_verified), (Some("bob@corp.example"), true));
+    let removed = auth.update_account(&admin, bob.id, AccountUpdate { email: Some(String::new()), ..Default::default() });
+    let bob = removed.await.unwrap();
+    assert_eq!((bob.email, bob.email_verified), (None, false));
 }
