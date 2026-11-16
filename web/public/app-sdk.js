@@ -9,6 +9,10 @@
 //   rustcloud.close();                            // as the panel's close button
 //   await rustcloud.openFrame({ url, fields: { access_token } });  // an approved service over the page
 //   rustcloud.onFrameMessage((data) => …); rustcloud.postToFrame(data); rustcloud.closeFrame();
+//   rustcloud.onEvent((e) => …);                  // { type: 'changed' }: someone sent the user something
+//   const f = await rustcloud.shareFile({ with: ['bob'], upload: file });  // the user picks or uploads, agrees
+//   const l = await rustcloud.shareLink({ upload: file });                 // a public link, the same way
+//   await rustcloud.unshare(f.shares[0]);         // ends one made through this app
 //
 // A page opened for a file (`[[open_with]]` in the manifest) gets `?file=<id>`
 // in its address and ctx.file = { id, name, mime_type, write }: the app has
@@ -25,6 +29,7 @@
 (() => {
   const pending = new Map();
   const frameListeners = [];
+  const eventListeners = [];
   let next = 1;
   let gotContext;
   const context = new Promise((resolve) => (gotContext = resolve));
@@ -42,6 +47,10 @@
       for (const listener of frameListeners) listener(message.data);
       return;
     }
+    if (message.rustcloud === 'event') {
+      for (const listener of eventListeners) listener({ type: message.type });
+      return;
+    }
     const request = pending.get(message.id);
     if (!request) return;
     pending.delete(message.id);
@@ -49,6 +58,8 @@
       request.resolve(message.folder);
     } else if (message.rustcloud === 'shared' || message.rustcloud === 'frame-opened') {
       request.resolve();
+    } else if (message.rustcloud === 'result') {
+      request.resolve(message.value);
     } else if (message.rustcloud === 'response') {
       const empty = message.status === 204 || message.status === 304;
       request.resolve(new Response(empty ? null : message.body, { status: message.status, headers: message.headers }));
@@ -116,6 +127,46 @@
     });
   }
 
+  function ask(message, transfer = []) {
+    return new Promise((resolve, reject) => {
+      const id = next++;
+      pending.set(id, { resolve, reject });
+      window.parent.postMessage({ ...message, id }, '*', transfer);
+    });
+  }
+
+  /**
+   * Asks the user to share a file with people (`with`: usernames) through
+   * this app, read-only unless `write`. The user picks the file in the
+   * panel's dialog, or gives `upload` (a File, e.g. dropped into a chat),
+   * which the panel puts into their files first. Resolves to
+   * { id, name, size, mime_type, shares: [share ids] }; rejects if the user
+   * declines. The app needs no access to the user's files for it: the others
+   * open the file in Files, and the app shows its picture with
+   * `links.thumbnail`.
+   */
+  function shareFile({ with: people = [], upload, write = false } = {}) {
+    return ask({ rustcloud: 'share-file', with: people, upload, write: write === true });
+  }
+
+  /**
+   * Asks the user for a public link to a file they pick or `upload`, with
+   * the options of Files (expiry, password). Resolves to { id, url, name }.
+   */
+  function shareLink({ upload } = {}) {
+    return ask({ rustcloud: 'share-link', upload });
+  }
+
+  /** Ends a share or public link made through this app (its id). */
+  function unshare(shareId) {
+    return ask({ rustcloud: 'unshare', share: String(shareId) });
+  }
+
+  /** Calls `listener(event)` when the panel hears something for this app: { type: 'changed' }. */
+  function onEvent(listener) {
+    eventListeners.push(listener);
+  }
+
   /** Shows the page over the whole browser window ('full') or in the panel's page area ('panel'). */
   function setLayout(mode) {
     window.parent.postMessage({ rustcloud: 'layout', mode: mode === 'full' ? 'full' : 'panel' }, '*');
@@ -166,6 +217,10 @@
     postToFrame,
     onFrameMessage,
     closeFrame,
+    shareFile,
+    shareLink,
+    unshare,
+    onEvent,
   };
   window.parent.postMessage({ rustcloud: 'ready' }, '*');
 })();

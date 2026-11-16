@@ -166,6 +166,18 @@ impl TestApp {
         reply.session_cookie()
     }
 
+    /// The panel's events of a user (`/api/v1/apps/events`), connected now.
+    async fn events(&self, cookie: &str) -> Events {
+        let request = Request::get("/api/v1/apps/events")
+            .header(header::COOKIE, cookie)
+            .header("x-requested-with", "rustcloud")
+            .body(Body::empty())
+            .unwrap();
+        let response = self.router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        Events(tokio::sync::Mutex::new((response.into_body(), String::new())))
+    }
+
     async fn root_id(&self, cookie: &str) -> String {
         self.get("/api/v1/files/root", As::Browser(cookie)).await.json()["id"].as_str().unwrap().to_owned()
     }
@@ -175,6 +187,34 @@ impl TestApp {
         let reply = self.send(Method::POST, &uri, As::Browser(cookie), Body::from(content), &[]).await;
         assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text());
         reply.json()
+    }
+}
+
+/// Server-sent events as they come.
+struct Events(tokio::sync::Mutex<(Body, String)>);
+
+impl Events {
+    /// The data of the next event called `name`; the ones before it are skipped.
+    async fn next(&self, name: &str) -> Value {
+        let mut guard = self.0.lock().await;
+        let (body, buffer) = &mut *guard;
+        loop {
+            while let Some(end) = buffer.find("\n\n") {
+                let block: String = buffer.drain(..end + 2).collect();
+                if block.lines().any(|line| line == format!("event: {name}")) {
+                    let data = block.lines().find_map(|line| line.strip_prefix("data: ")).unwrap_or("null");
+                    return serde_json::from_str(data).unwrap();
+                }
+            }
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(20), body.frame())
+                .await
+                .unwrap_or_else(|_| panic!("no {name} event in time"))
+                .unwrap()
+                .unwrap();
+            if let Ok(data) = frame.into_data() {
+                buffer.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
     }
 }
 
@@ -1723,7 +1763,7 @@ async fn users_add_jobs_for_each_other_only_as_far_as_allowed() {
     assert_eq!(progress(bob.clone()).await, "", "nothing waits for bob");
     // Herself she always reaches.
     assert_eq!(send(&alice_id, "note").await, "sent");
-    assert_eq!(mail(alice.clone(), "alice").await, "note | files: false, storage: false, http: false");
+    assert_eq!(mail(alice.clone(), "alice").await, "note | files: false, storage: false, ring: false, http: false");
 
     // In one group, alice reaches bob, by name or id; carol stays out.
     let group = app.json(Method::POST, "/api/v1/admin/groups", As::Browser(&admin), json!({ "name": "Team" })).await;
@@ -1735,7 +1775,7 @@ async fn users_add_jobs_for_each_other_only_as_far_as_allowed() {
     assert_eq!(send("bob,carol", "hello").await, "sent");
     // Bob's job runs as bob, knows alice sent it, and gets no files,
     // storage or network: alice chose what it works on.
-    assert_eq!(mail(bob.clone(), "alice").await, "hello | files: false, storage: false, http: false");
+    assert_eq!(mail(bob.clone(), "alice").await, "hello | files: false, storage: false, ring: false, http: false");
     assert_eq!(progress(carol.clone()).await, "");
 
     // The administrator may let everyone reach everyone.
@@ -1743,7 +1783,7 @@ async fn users_add_jobs_for_each_other_only_as_far_as_allowed() {
     let saved = app.json(Method::PUT, "/api/v1/admin/plugins/echo", As::Browser(&admin), everyone).await;
     assert_eq!(saved.json()["reach"], "all");
     assert_eq!(send("carol", "hey").await, "sent");
-    assert_eq!(mail(carol.clone(), "alice").await, "hey | files: false, storage: false, http: false");
+    assert_eq!(mail(carol.clone(), "alice").await, "hey | files: false, storage: false, ring: false, http: false");
 
     // Bob blocks alice: nothing more from her, the same answer for her.
     let block = format!("/app/echo/block?{alice_id}");
@@ -1751,12 +1791,89 @@ async fn users_add_jobs_for_each_other_only_as_far_as_allowed() {
     assert_eq!(send("bob", "again").await, "sent");
     assert_eq!(progress(bob.clone()).await, "", "nothing waits for bob");
 
+    // The panel hears of it: a ring over any page, a badge, a done job from
+    // someone else; never what the plugin keeps.
+    let carol_events = app.events(&carol).await;
+    assert_eq!(
+        app.send(Method::POST, "/app/echo/ring?carol", As::Browser(&alice), Body::empty(), &[]).await.text(),
+        "rung"
+    );
+    let ring = carol_events.next("ring").await;
+    assert_eq!(
+        (ring["app"].as_str(), ring["kind"].as_str(), ring["ref"].as_str()),
+        (Some("echo"), Some("call"), Some("r1"))
+    );
+    assert_eq!(ring["from"]["username"], "alice");
+    let cancel = app.send(Method::POST, "/app/echo/cancel?carol", As::Browser(&alice), Body::empty(), &[]).await;
+    assert_eq!(cancel.text(), "cancelled");
+    assert_eq!(carol_events.next("ring-end").await["id"], ring["id"]);
+    app.send(Method::POST, "/app/echo/badge?3", As::Browser(&carol), Body::empty(), &[]).await;
+    assert_eq!(carol_events.next("badge").await, json!({ "app": "echo", "count": 3 }));
+    assert_eq!(send("carol", "again").await, "sent");
+    assert_eq!(carol_events.next("changed").await, json!({ "app": "echo" }));
+    // A new connection starts with the badges.
+    assert_eq!(app.events(&carol).await.next("badge").await["count"], 3);
+    // Bob blocked alice: no ring either, the same answer.
+    assert_eq!(
+        app.send(Method::POST, "/app/echo/ring?bob", As::Browser(&alice), Body::empty(), &[]).await.text(),
+        "rung"
+    );
+
     // Only kinds of permissions.deliver, at most 50 people, 64 KiB.
     let many = vec!["x"; 51].join(",");
     assert!(send(&many, "hi").await.contains("Invalid"));
     let uri = "/app/echo/send-to?carol";
     let big = app.send(Method::POST, uri, As::Browser(&alice), Body::from("x".repeat(65 << 10)), &[]).await;
     assert!(big.text().contains("Invalid"), "too much data");
+}
+
+#[tokio::test]
+async fn webhooks_get_other_servers_credentials_and_plugins_end_their_shares() {
+    let manifest = format!("webhooks = [\"/hook\"]\n{}", echo_manifest_toml());
+    let app = TestApp::with_wasm_apps(|apps| {
+        std::fs::create_dir_all(apps.join("echo")).unwrap();
+        std::fs::write(apps.join("echo/manifest.toml"), &manifest).unwrap();
+        std::fs::write(apps.join("echo/app.wasm"), echo_wasm()).unwrap();
+    })
+    .await;
+    let alice = app.register("alice").await;
+    app.register("bob").await;
+    async fn hook(app: &TestApp, who: As<'_>, extra: &[(header::HeaderName, &str)]) -> String {
+        app.send(Method::POST, "/app/echo/hook", who, Body::empty(), extra).await.text()
+    }
+    let signed = [(header::AUTHORIZATION, "eyJ.lk.sig")];
+    let forged = [(header::HeaderName::from_static("x-rustcloud-authorization"), "forged")];
+
+    // LiveKit's signature reaches the app; nobody is logged in, cookie or not.
+    assert_eq!(hook(&app, As::Anonymous, &signed).await, "nobody eyJ.lk.sig");
+    assert_eq!(hook(&app, As::Browser(&alice), &signed).await, "nobody eyJ.lk.sig");
+    // Credentials of this server never do, nor a header a client made up.
+    assert_eq!(hook(&app, As::Basic("alice", "password123"), &[]).await, "nobody -");
+    assert_eq!(hook(&app, As::Token("rc_whatever"), &[]).await, "nobody -");
+    assert_eq!(hook(&app, As::Anonymous, &forged).await, "nobody -");
+    let other = app.send(Method::GET, "/app/echo/headers", As::Anonymous, Body::empty(), &forged).await.text();
+    assert!(!other.contains("x-rustcloud-authorization"), "{other}");
+
+    // Echo ends a share made through it, not one made in Files.
+    let alice = alice.as_str();
+    let root = app.root_id(alice).await;
+    let file = app.upload(alice, &root, "photo.jpg", "jpeg").await;
+    let uri = format!("/api/v1/files/{}/access", file["id"].as_str().unwrap());
+    let via_echo = app.json(Method::POST, &uri, As::Browser(alice), json!({ "username": "bob", "app": "echo" })).await;
+    assert_eq!(via_echo.json()["app"], "echo");
+    let file2 = app.upload(alice, &root, "notes.txt", "text").await;
+    let uri2 = format!("/api/v1/files/{}/access", file2["id"].as_str().unwrap());
+    let by_hand = app.json(Method::POST, &uri2, As::Browser(alice), json!({ "username": "bob" })).await;
+    let unshare = |id: String| {
+        let app = &app;
+        async move {
+            let uri = format!("/app/echo/unshare?{id}");
+            app.send(Method::POST, &uri, As::Browser(alice), Body::empty(), &[]).await.text()
+        }
+    };
+    assert!(unshare(by_hand.json()["id"].as_str().unwrap().to_owned()).await.contains("NotFound"));
+    assert_eq!(unshare(via_echo.json()["id"].as_str().unwrap().to_owned()).await, "ended");
+    assert_eq!(app.get(&uri, As::Browser(alice)).await.json(), json!([]));
 }
 
 #[tokio::test]

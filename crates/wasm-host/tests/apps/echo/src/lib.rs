@@ -4,7 +4,8 @@ wit_bindgen::generate!({ path: "../../../../plugin-api/wit", world: "app-with-jo
 
 use rustcloud::app::jobs::NewJob;
 use rustcloud::app::{
-    appdata, files, http, jobs, limits, links, log, proxy, settings, storage, tokens, use_ffmpeg, use_onnx,
+    appdata, files, http, jobs, limits, links, log, notify, proxy, settings, shares, storage, tokens, use_ffmpeg,
+    use_onnx,
 };
 
 struct Echo;
@@ -22,9 +23,10 @@ impl Guest for Echo {
                 _ if job.kind == "mail" => {
                     let from = origin.map_or("?".to_owned(), |o| o.from.username);
                     let reach = format!(
-                        "files: {}, storage: {}, http: {}",
+                        "files: {}, storage: {}, ring: {}, http: {}",
                         files::granted().is_ok(),
                         storage::list("").is_ok(),
+                        notify::ring(&[from.clone()], notify::RingKind::Call, "r", 0).is_ok(),
                         !matches!(
                             http::fetch(&http::Request {
                                 method: "GET".to_owned(),
@@ -253,6 +255,37 @@ impl Guest for Echo {
                 Ok(data) => text(200, String::from_utf8_lossy(&data)),
                 Err(err) => text(404, format!("{err:?}")),
             },
+            // Rings the users of the query (`alice,bob`) about a call `r1`; `/cancel` ends it.
+            "/ring" => {
+                let to: Vec<String> = request.query.split(',').map(str::to_owned).collect();
+                match notify::ring(&to, notify::RingKind::Call, "r1", 30) {
+                    Ok(()) => text(200, "rung"),
+                    Err(err) => text(400, format!("{err:?}")),
+                }
+            }
+            "/cancel" => {
+                let to: Vec<String> = request.query.split(',').map(str::to_owned).collect();
+                match notify::cancel(&to, "r1") {
+                    Ok(()) => text(200, "cancelled"),
+                    Err(err) => text(400, format!("{err:?}")),
+                }
+            }
+            "/badge" => match notify::badge(request.query.parse().unwrap_or(0)) {
+                Ok(()) => text(200, "set"),
+                Err(err) => text(400, format!("{err:?}")),
+            },
+            // Ends a share made through this app: `?<id>`.
+            "/unshare" => match shares::unshare(&request.query) {
+                Ok(()) => text(200, "ended"),
+                Err(err) => text(404, format!("{err:?}")),
+            },
+            // A webhook (`webhooks` in the manifest): who calls, and what came in
+            // `x-rustcloud-authorization`.
+            "/hook" => {
+                let auth = request.headers.iter().find(|(name, _)| name == "x-rustcloud-authorization");
+                let who = user.as_ref().map_or("nobody".to_owned(), |u| u.username.clone());
+                text(200, format!("{who} {}", auth.map_or("-", |(_, value)| value.as_str())))
+            }
             // Blocks the user of the query (an id), or lists who is blocked.
             "/block" => match jobs::block(&request.query) {
                 Ok(()) => text(200, "blocked"),

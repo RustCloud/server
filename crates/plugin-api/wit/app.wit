@@ -257,6 +257,12 @@ interface shares {
     delete: func(share-id: string, path: string) -> result<_, error>;
     /// Gives the share up: the folder is gone for this user, the owner keeps it.
     leave: func(share-id: string) -> result<_, error>;
+
+    /// Ends a share of a file or a public link the user made through this
+    /// app (`rustcloud.shareFile`, `rustcloud.shareLink`, since 0.2.19):
+    /// not one made in Files or through another app. Works in jobs too —
+    /// it only takes access away. `not-found` for any other id.
+    unshare: func(share-id: string) -> result<_, error>;
 }
 
 /// The app's settings for the whole server, which the administrator fills
@@ -334,6 +340,13 @@ interface links {
     /// piece of fragmented MP4 when the player asks for it. Needs
     /// `use.ffmpeg`; otherwise, or for a file that is no video, `other`.
     video-stream: func(target: target, mode: stream-mode) -> result<string, error>;
+
+    /// A link to a small picture (WebP) of a file someone shared through
+    /// this app (`rustcloud.shareFile`) and the user reaches: the
+    /// recipient's chat shows a preview of an attachment without the app
+    /// reading the file (since 0.2.19). `not-found` for other files and
+    /// files without a picture (no media engine, not a photo or video).
+    thumbnail: func(file-id: string) -> result<string, error>;
 
     /// A link the app's page uploads one file to (since 0.2.12): it `POST`s
     /// the file's bytes as the body to `/api/v1/app-links/…` and gets the
@@ -567,6 +580,46 @@ interface jobs {
     unblock: func(user-id: string) -> result<_, error>;
     /// Ids of the users the user of the request blocked in this app.
     blocked: func() -> result<list<string>, error>;
+}
+
+/// What the panel shows the user for the app (since 0.2.19): a number by
+/// its entry in the side panel, and rings — a call or a message from
+/// someone, over any page of the cloud.
+interface notify {
+    variant error {
+        /// The request has no logged-in user.
+        no-user,
+        /// `ring` without `permissions.deliver`, more than 50 users, a
+        /// `ref` that isn't 1–200 letters, digits or `-_.:`, or from a job
+        /// someone else added.
+        invalid(string),
+        /// The sender rings too much.
+        too-many,
+        other(string),
+    }
+
+    /// What a ring is about; the panel writes the text in the user's
+    /// language: "Talk · alice: incoming call".
+    enum ring-kind {
+        call,
+        message,
+        invite,
+    }
+
+    /// Rings each of `to` (ids or usernames, at most 50) for `ttl-seconds`
+    /// (5–300; 0: 60) in every tab they have open, with the app's name and
+    /// the sender's username; "Open" leads to the app's page with
+    /// `?ring=<ref>`. The same people `jobs.add-for` reaches, with the same
+    /// answer for those it doesn't. Ringing them again with the same `ref`
+    /// starts anew. Needs `permissions.deliver`.
+    ring: func(to: list<string>, kind: ring-kind, ref: string, ttl-seconds: u32) -> result<_, error>;
+    /// Ends the sender's ring `ref` for each of `to`: the caller hung up.
+    cancel: func(to: list<string>, ref: string) -> result<_, error>;
+    /// Ends the rings `ref` for the user of the request, in all their
+    /// tabs: answered on another device.
+    dismiss: func(ref: string) -> result<_, error>;
+    /// The number by the app in the user's side panel; 0 hides it.
+    badge: func(count: u32) -> result<_, error>;
 }
 
 /// ffmpeg, run by the server for the app (since 0.2.7; manifest
@@ -893,6 +946,7 @@ world app {
     import http;
     import storage;
     import jobs;
+    import notify;
     import use-ffmpeg;
     import use-onnx;
     import proxy;
@@ -918,6 +972,7 @@ world app-with-jobs {
     import http;
     import storage;
     import jobs;
+    import notify;
     import use-ffmpeg;
     import use-onnx;
     import proxy;

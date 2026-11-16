@@ -80,6 +80,8 @@ use bindings::rustcloud::app::appdata::Error as AppDataError;
 use bindings::rustcloud::app::files::{Error as FilesError, LockError};
 use bindings::rustcloud::app::http::{Error as HttpError, Request as HttpRequest, Response as HttpResponse};
 use bindings::rustcloud::app::jobs::{Error as JobsError, SendError};
+use bindings::rustcloud::app::notify::Error as NotifyError;
+pub use bindings::rustcloud::app::notify::RingKind;
 use bindings::rustcloud::app::shares::Error as SharesError;
 use bindings::rustcloud::app::storage::Error as StorageError;
 use bindings::rustcloud::app::tokens::Error as TokenError;
@@ -183,6 +185,30 @@ pub trait UserServices: Send + Sync {
     }
     /// Ids of the users the user blocked in the app.
     async fn jobs_blocked(&self) -> Result<Vec<String>> {
+        Err(unavailable())
+    }
+    /// Ends a share or public link the user made through the app.
+    async fn shares_unshare(&self, _share_id: &str) -> Result<()> {
+        Err(unavailable())
+    }
+    /// A link for the app's page to the thumbnail of a file shared through the app.
+    async fn links_thumbnail(&self, _file: &str) -> Result<String> {
+        Err(unavailable())
+    }
+    /// Rings users of the app (`notify.ring`).
+    async fn notify_ring(&self, _to: Vec<String>, _kind: RingKind, _reference: &str, _ttl_seconds: u32) -> Result<()> {
+        Err(unavailable())
+    }
+    /// Ends the user's ring `reference` for each of `to`.
+    async fn notify_cancel(&self, _to: Vec<String>, _reference: &str) -> Result<()> {
+        Err(unavailable())
+    }
+    /// Ends the rings `reference` for the user.
+    async fn notify_dismiss(&self, _reference: &str) -> Result<()> {
+        Err(unavailable())
+    }
+    /// The number by the app in the user's side panel.
+    async fn notify_badge(&self, _count: u32) -> Result<()> {
         Err(unavailable())
     }
 
@@ -859,6 +885,22 @@ impl UserServices for Confined {
     async fn jobs_blocked(&self) -> Result<Vec<String>> {
         self.0.jobs_blocked().await
     }
+    // Only taking away and telling the user: no reach into anything.
+    async fn shares_unshare(&self, share_id: &str) -> Result<()> {
+        self.0.shares_unshare(share_id).await
+    }
+    async fn notify_cancel(&self, to: Vec<String>, reference: &str) -> Result<()> {
+        self.0.notify_cancel(to, reference).await
+    }
+    async fn notify_dismiss(&self, reference: &str) -> Result<()> {
+        self.0.notify_dismiss(reference).await
+    }
+    async fn notify_badge(&self, count: u32) -> Result<()> {
+        self.0.notify_badge(count).await
+    }
+    async fn notify_ring(&self, _to: Vec<String>, _kind: RingKind, _reference: &str, _ttl_seconds: u32) -> Result<()> {
+        Err(Error::bad_request("INVALID_RING", "A job someone else added rings nobody"))
+    }
 
     async fn files_granted(&self) -> Result<Vec<FileNode>> {
         Err(confined())
@@ -1094,6 +1136,10 @@ impl bindings::rustcloud::app::shares::Host for Instance {
 
     async fn leave(&mut self, share_id: String) -> std::result::Result<(), SharesError> {
         self.host(self.share_services()?.shares_leave(&share_id)).await.map_err(shares_error)
+    }
+
+    async fn unshare(&mut self, share_id: String) -> std::result::Result<(), SharesError> {
+        self.host(self.share_services()?.shares_unshare(&share_id)).await.map_err(shares_error)
     }
 }
 
@@ -1405,6 +1451,47 @@ impl bindings::rustcloud::app::links::Host for Instance {
     async fn replace(&mut self, file: String, if_match: Option<String>) -> std::result::Result<String, LinkError> {
         let services = self.services.clone().ok_or(LinkError::NoSession)?;
         self.host(services.links_replace(&file, if_match.as_deref())).await.map_err(link_error)
+    }
+
+    async fn thumbnail(&mut self, file_id: String) -> std::result::Result<String, LinkError> {
+        let services = self.services.clone().ok_or(LinkError::NoSession)?;
+        self.host(services.links_thumbnail(&file_id)).await.map_err(link_error)
+    }
+}
+
+fn notify_error(err: Error) -> NotifyError {
+    match err.code {
+        "INVALID_RING" => NotifyError::Invalid(err.message),
+        "TOO_MANY_RINGS" => NotifyError::TooMany,
+        _ => NotifyError::Other(err.message),
+    }
+}
+
+impl bindings::rustcloud::app::notify::Host for Instance {
+    async fn ring(
+        &mut self,
+        to: Vec<String>,
+        kind: RingKind,
+        reference: String,
+        ttl_seconds: u32,
+    ) -> std::result::Result<(), NotifyError> {
+        let services = self.services.clone().ok_or(NotifyError::NoUser)?;
+        self.host(services.notify_ring(to, kind, &reference, ttl_seconds)).await.map_err(notify_error)
+    }
+
+    async fn cancel(&mut self, to: Vec<String>, reference: String) -> std::result::Result<(), NotifyError> {
+        let services = self.services.clone().ok_or(NotifyError::NoUser)?;
+        self.host(services.notify_cancel(to, &reference)).await.map_err(notify_error)
+    }
+
+    async fn dismiss(&mut self, reference: String) -> std::result::Result<(), NotifyError> {
+        let services = self.services.clone().ok_or(NotifyError::NoUser)?;
+        self.host(services.notify_dismiss(&reference)).await.map_err(notify_error)
+    }
+
+    async fn badge(&mut self, count: u32) -> std::result::Result<(), NotifyError> {
+        let services = self.services.clone().ok_or(NotifyError::NoUser)?;
+        self.host(services.notify_badge(count)).await.map_err(notify_error)
     }
 }
 

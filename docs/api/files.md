@@ -269,6 +269,11 @@ curl -H "Authorization: Bearer $TOKEN" --data-binary @photo.jpg \
 
 ## Доступ
 
+`GET /api/v1/access` — всё, чем пользователь поделился с людьми (без публичных ссылок), новое сверху:
+`Access` с полем `node`. У доступа и у [публичной ссылки](shares.md), сделанных через плагин
+(`rustcloud.shareFile`, `rustcloud.shareLink`), есть `app` — id плагина; в `POST
+/api/v1/files/{id}/access` и `POST /api/v1/shares` его передаёт панель, у новых только.
+
 Все проверки прав — в одной функции `Files::check_access`
 ([service.rs](../../crates/files/src/service.rs)). Чужой файл отвечает `404`, а не `403`,
 чтобы не выдавать его существование.

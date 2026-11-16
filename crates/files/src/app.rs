@@ -34,6 +34,8 @@ pub fn manifest() -> Manifest {
         status: None,
         proxy: Vec::new(),
         limits: Default::default(),
+        one_batch_per_user: false,
+        webhooks: Vec::new(),
     }
 }
 

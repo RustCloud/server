@@ -23,8 +23,8 @@ use rustcloud_core::{audit, ClientInfo, Error, Result};
 use rustcloud_files::{Files, Locking};
 use rustcloud_plugin_api::Images;
 use rustcloud_wasm_host::{
-    AppDataEntry, AppToken, Caller, FileLock, FileNode, FileVersion, JobProgress, LinkTarget, NewJob, Request, Share,
-    StreamMode, TokenScope, User, UserServices, BODY_SIZE_HEADER, SEND_HEADER,
+    AppDataEntry, AppToken, Caller, FileLock, FileNode, FileVersion, JobProgress, LinkTarget, NewJob, Request,
+    RingKind, Share, StreamMode, TokenScope, User, UserServices, BODY_SIZE_HEADER, SEND_HEADER,
 };
 use uuid::Uuid;
 
@@ -71,6 +71,18 @@ fn redirect_allowed(location: &str, frames: &[String]) -> bool {
     let first = path.split(['/', '?', '#']).next().unwrap_or_default();
     let relative = !path.starts_with("//") && !first.contains(':');
     relative || frames.iter().any(|origin| path == *origin || path.starts_with(&format!("{origin}/")))
+}
+
+/// The header a webhook's `Authorization` reaches the app in (`webhooks` in
+/// the manifest).
+const WEBHOOK_AUTHORIZATION: &str = "x-rustcloud-authorization";
+
+/// Whether an `Authorization` value is something this server takes: a
+/// session or app token (`Bearer`), an app password (`Basic`). Those never
+/// reach an app, not even through a webhook.
+fn credential_of_this_server(value: &str) -> bool {
+    let scheme = value.split_whitespace().next().unwrap_or_default();
+    scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("basic")
 }
 
 /// The largest body of a request without a user: anyone may send those.
@@ -155,8 +167,14 @@ async fn forward(
         return Err(Error::forbidden("Apps can't install service workers").with_code("NO_SERVICE_WORKER"));
     }
     let authorization = parts.headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    // A webhook another server calls with its own credentials: no user, and
+    // its `Authorization` for the app to check, never one of this server's.
+    let webhook = state.plugins.get(id).is_some_and(|app| app.webhooks.iter().any(|hook| hook[1..] == path));
+    let foreign = authorization.filter(|value| webhook && !credential_of_this_server(value)).map(str::to_owned);
     let token = token_of(parts.uri.query(), authorization);
-    let services = if let Some(token) = token {
+    let services = if webhook {
+        None
+    } else if let Some(token) = token {
         match token_services(state, id, &token).await? {
             Some(services) => Some(services),
             None => return Err(Error::unauthorized("The token is not valid or has run out")),
@@ -219,7 +237,7 @@ async fn forward(
     let body = RequestBody::receive(body, in_memory, keep).await?;
     // A token of another server reaches only its own file.
     let token_file = services.as_ref().and_then(|services| services.token.as_ref().map(|token| token.f));
-    let request = to_app_request(&parts.method, &parts.uri, &parts.headers, path, &body);
+    let request = to_app_request(&parts.method, &parts.uri, &parts.headers, path, &body, foreign.as_deref());
     let caller = services.map(|mut services| {
         services.body = Some(body);
         services.into_caller()
@@ -377,16 +395,26 @@ fn basic_challenge() -> HttpResponse {
     response
 }
 
-fn to_app_request(method: &Method, uri: &Uri, headers: &HeaderMap, path: String, body: &RequestBody) -> Request {
+fn to_app_request(
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    path: String,
+    body: &RequestBody,
+    webhook_authorization: Option<&str>,
+) -> Request {
     let mut headers: Vec<(String, String)> = headers
         .iter()
         .filter(|(name, _)| *name != header::COOKIE && *name != header::AUTHORIZATION)
-        // Only the server says a body was kept.
-        .filter(|(name, _)| name.as_str() != BODY_SIZE_HEADER)
+        // Only the server says a body was kept, and what a webhook carried.
+        .filter(|(name, _)| name.as_str() != BODY_SIZE_HEADER && name.as_str() != WEBHOOK_AUTHORIZATION)
         .filter_map(|(name, value)| Some((name.as_str().to_owned(), value.to_str().ok()?.to_owned())))
         .collect();
     if let Some(size) = body.kept_size() {
         headers.push((BODY_SIZE_HEADER.to_owned(), size.to_string()));
+    }
+    if let Some(authorization) = webhook_authorization {
+        headers.push((WEBHOOK_AUTHORIZATION.to_owned(), authorization.to_owned()));
     }
     Request {
         method: method.as_str().to_owned(),
@@ -789,6 +817,36 @@ impl UserServices for ServicesFor {
         Ok(self.jobs.blocked(&self.app_id, self.user.id).await?.iter().map(Uuid::to_string).collect())
     }
 
+    async fn shares_unshare(&self, share_id: &str) -> Result<()> {
+        self.check_write()?;
+        let id = Uuid::parse_str(share_id).map_err(|_| Error::not_found("SHARE_NOT_FOUND", "No such share"))?;
+        self.files.remove_app_share(&self.user, &self.app_id, id).await
+    }
+
+    async fn links_thumbnail(&self, file: &str) -> Result<String> {
+        let session = self.session.ok_or_else(|| Error::forbidden("Links are for pages").with_code("NO_SESSION"))?;
+        let id = node_id(file)?;
+        self.links.create_thumbnail(session, &self.user, &self.app_id, id).await
+    }
+
+    async fn notify_ring(&self, to: Vec<String>, kind: RingKind, reference: &str, ttl_seconds: u32) -> Result<()> {
+        self.check_write()?;
+        self.jobs.ring(&self.app_id, &self.user, to, kind, reference, ttl_seconds).await
+    }
+
+    async fn notify_cancel(&self, to: Vec<String>, reference: &str) -> Result<()> {
+        self.jobs.cancel_ring(&self.app_id, self.user.id, &to, reference).await
+    }
+
+    async fn notify_dismiss(&self, reference: &str) -> Result<()> {
+        self.jobs.events.dismiss(&self.app_id, self.user.id, reference);
+        Ok(())
+    }
+
+    async fn notify_badge(&self, count: u32) -> Result<()> {
+        self.jobs.events.badge(self.user.id, &self.app_id, count).await
+    }
+
     async fn files_open(&self, id: &str) -> Result<std::fs::File> {
         let (opened, file) = self.files.app_open(&self.user, &self.app_id, self.file_id(id)?).await?;
         self.read(&file);
@@ -859,6 +917,15 @@ mod tests {
         assert!(!from_a_web_page(&headers(&[("sec-fetch-site", "none")])), "typed into the address bar");
         assert!(from_a_web_page(&headers(&[("origin", "https://evil.example")])));
         assert!(from_a_web_page(&headers(&[("sec-fetch-site", "cross-site")])));
+    }
+
+    #[test]
+    fn webhooks_get_only_credentials_of_other_servers() {
+        assert!(credential_of_this_server("Bearer abc"));
+        assert!(credential_of_this_server("bearer rc_x"));
+        assert!(credential_of_this_server("  Basic YTpi"));
+        assert!(!credential_of_this_server("eyJhbGciOiJIUzI1NiJ9.e30.sig"), "LiveKit's JWT");
+        assert!(!credential_of_this_server("HMAC key=1"));
     }
 
     #[test]

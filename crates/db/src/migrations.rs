@@ -32,6 +32,7 @@ impl MigratorTrait for Migrator {
             Box::new(Groups),
             Box::new(EmailVerified),
             Box::new(Delivery),
+            Box::new(SharedThroughApps),
         ]
     }
 }
@@ -873,6 +874,39 @@ impl MigrationTrait for Delivery {
                     .primary_key(Index::create().col("app_id").col("user_id").col("blocked_id"))
                     .foreign_key(&mut cascade_fk("plugin_blocks", "user_id", "users"))
                     .foreign_key(&mut cascade_fk("plugin_blocks", "blocked_id", "users"))
+                    .to_owned(),
+            )
+            .await
+    }
+}
+
+/// Shares and public links made through a plugin (`file_shares.app`,
+/// `shares.app`: the plugin's id; none for ones made in Files), and the
+/// number a plugin shows by its entry in the side panel for a user
+/// (`plugin_badges`).
+struct SharedThroughApps;
+
+impl MigrationName for SharedThroughApps {
+    fn name(&self) -> &str {
+        "m0023_shared_through_apps"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for SharedThroughApps {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager.alter_table(Table::alter().table("file_shares").add_column(string_null("app")).to_owned()).await?;
+        manager.alter_table(Table::alter().table("shares").add_column(string_null("app")).to_owned()).await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table("plugin_badges")
+                    .col(string("app_id"))
+                    .col(uuid("user_id"))
+                    .col(integer("count"))
+                    .col(timestamp_with_time_zone("updated_at"))
+                    .primary_key(Index::create().col("app_id").col("user_id"))
+                    .foreign_key(&mut cascade_fk("plugin_badges", "user_id", "users"))
                     .to_owned(),
             )
             .await

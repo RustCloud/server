@@ -100,6 +100,18 @@ pub struct Manifest {
     /// ([`crate::limits`]); the administrator may give it more or less.
     #[serde(default, skip_serializing_if = "Scale::is_default")]
     pub limits: Scale,
+    /// Batches of jobs of one user never run at once, whatever `workers`
+    /// (since 0.2.19): the batches of different users still do. For apps
+    /// whose jobs rewrite the same files of a user's AppData.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub one_batch_per_user: bool,
+    /// Paths of the app that other servers call with their own
+    /// `Authorization` (since 0.2.19): LiveKit's webhooks, say. A request to
+    /// them comes without a user, and its `Authorization`, unless it is a
+    /// credential of this server, reaches the app as
+    /// `x-rustcloud-authorization` for the app to check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<String>,
 }
 
 /// A kind of background job:
@@ -689,6 +701,18 @@ impl Manifest {
                 return Err(ManifestError(format!("app \"{}\": job \"{}\" {problem}", self.id, job.kind)));
             }
         }
+        for path in &self.webhooks {
+            let valid = path.starts_with('/') && path.len() <= 200 && !path.contains(['?', '#', '*']);
+            if !valid {
+                return Err(ManifestError(format!(
+                    "app \"{}\": webhook \"{path}\" must be a path starting with \"/\"",
+                    self.id
+                )));
+            }
+        }
+        if self.webhooks.len() > 10 {
+            return Err(ManifestError(format!("app \"{}\" has more than 10 webhooks", self.id)));
+        }
         for kind in &self.permissions.deliver {
             if !self.jobs.iter().any(|job| &job.kind == kind) {
                 return Err(ManifestError(format!(
@@ -1049,6 +1073,18 @@ mod tests {
         assert!(Manifest::from_toml(&unknown).unwrap_err().0.contains("must name a text server setting"));
         let path = text.replace("frame = [\"{office_url}\"]", "frame = [\"https://x.example/path\"]");
         assert!(Manifest::from_toml(&path).unwrap_err().0.contains("permissions.frame"));
+    }
+
+    #[test]
+    fn webhooks_are_paths_of_the_app() {
+        let text = format!("one_batch_per_user = true\nwebhooks = [\"/livekit\"]\n{NOTES}");
+        let manifest = Manifest::from_toml(&text).unwrap();
+        assert_eq!(manifest.webhooks, ["/livekit"]);
+        assert!(manifest.one_batch_per_user);
+        for wrong in ["livekit", "/hook?x=1", "/hook*"] {
+            let err = Manifest::from_toml(&text.replace("/livekit", wrong)).expect_err(wrong);
+            assert!(err.0.contains("webhook"), "{err}");
+        }
     }
 
     #[test]

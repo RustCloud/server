@@ -2,6 +2,7 @@
 <script lang="ts">
   import { isActive } from '../lib/apps';
   import { apps } from '../lib/apps.svelte';
+  import { appEvents } from '../lib/appEvents.svelte';
   import { t } from '../lib/i18n';
   import { href, route } from '../lib/router.svelte';
   import Icon, { iconOrDefault } from './Icon.svelte';
@@ -37,7 +38,14 @@
 <nav class="sidebar" class:collapsed aria-label={t.apps}>
   {#each apps.entries as app (app.id)}
     <a href={href(app.href)} class:active={isActive(app, route.parts.length ? route.parts : ['files'])} title={collapsed ? app.title : undefined}>
-      <Icon name={iconOrDefault(app.icon)} size={20} />
+      <span class="icon">
+        <Icon name={iconOrDefault(app.icon)} size={20} />
+        {#if appEvents.badges[app.id]}
+          <span class="badge" aria-label={String(appEvents.badges[app.id])}>
+            {appEvents.badges[app.id] > 99 ? '99+' : appEvents.badges[app.id]}
+          </span>
+        {/if}
+      </span>
       <span class="label">{app.title}</span>
     </a>
   {/each}
@@ -57,6 +65,25 @@
 </nav>
 
 <style>
+  .icon {
+    position: relative;
+    display: inline-flex;
+  }
+  .badge {
+    position: absolute;
+    top: -6px;
+    right: -8px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    background: var(--danger, #d33);
+    color: #fff;
+    font-size: 10px;
+    line-height: 16px;
+    text-align: center;
+    font-weight: 600;
+  }
   .sidebar {
     display: flex;
     flex-direction: column;

@@ -23,7 +23,7 @@
 //! what became of it, how many jobs are left — if that number doesn't go
 //! down, something is wrong.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,7 @@ use rustcloud_auth::Auth;
 use rustcloud_core::{Error, Result};
 use rustcloud_db::{group_member, plugin_block, plugin_job, user, DatabaseConnection};
 use rustcloud_files::{FileEvent, Files, Grant, GrantKind};
-use rustcloud_wasm_host::{Job, JobOrigin, JobOutcome, JobProgress, NewJob, User};
+use rustcloud_wasm_host::{Job, JobOrigin, JobOutcome, JobProgress, NewJob, RingKind, User};
 use sea_orm::sea_query::{Expr, ExprTrait, OnConflict};
 use sea_orm::ActiveValue::{NotSet, Unchanged};
 use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set};
@@ -41,6 +41,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, Notify};
 use uuid::Uuid;
 
+use crate::app_events::{self, AppEvents};
 use crate::app_links::AppLinks;
 use crate::app_routes::caller_for;
 use crate::plugins::{Plugins, Reach};
@@ -122,8 +123,12 @@ pub struct Jobs {
     turn: tokio::sync::Mutex<Turn>,
     /// Batches running now, by plugin: each runs at most its `workers`.
     running: std::sync::Mutex<HashMap<String, usize>>,
+    /// Plugins and users with a batch running now (`one_batch_per_user`).
+    busy: std::sync::Mutex<HashSet<(String, Uuid)>>,
     /// Jobs each sender added for others this minute, by plugin and sender.
     sent: std::sync::Mutex<HashMap<(String, Uuid), (Instant, u32)>>,
+    /// What the panel hears: done jobs from others, badges, rings.
+    pub events: Arc<AppEvents>,
 }
 
 /// A batch chosen to run: jobs of one plugin, user and kind.
@@ -143,7 +148,9 @@ impl Jobs {
         links: Arc<AppLinks>,
     ) -> Self {
         let (wake, turn, running, sent) = (Notify::new(), Default::default(), Default::default(), Default::default());
-        Self { db, files, auth, plugins, links, wake, turn, running, sent }
+        let events = Arc::new(AppEvents::new(db.clone()));
+        let busy = Default::default();
+        Self { db, files, auth, plugins, links, wake, turn, running, busy, sent, events }
     }
 
     /// Starts `workers` workers and the watcher of file events. Jobs that
@@ -160,10 +167,12 @@ impl Jobs {
             if let Err(err) = reset {
                 tracing::warn!("plugin jobs: {err}");
             }
-            tracing::info!("plugin jobs: {workers} at a time");
+            tracing::info!("plugin jobs: {workers} at a time, and one for jobs users add for each other");
             for _ in 0..workers {
-                tokio::spawn(jobs.clone().work());
+                tokio::spawn(jobs.clone().work(false));
             }
+            // A chat message doesn't wait behind an hour of faces.
+            tokio::spawn(jobs.clone().work(true));
         });
     }
 
@@ -306,9 +315,47 @@ impl Jobs {
         Ok(())
     }
 
-    /// The users of `to` the sender may add jobs for: existing, within
-    /// `reach`, not blocking the sender; each once.
-    async fn recipients(&self, app_id: &str, sender: Uuid, to: &[String], reach: Reach) -> Result<Vec<Uuid>> {
+    /// Rings users of a plugin: the same people `add-for` reaches.
+    pub async fn ring(
+        &self,
+        app_id: &str,
+        sender: &rustcloud_auth::User,
+        to: Vec<String>,
+        kind: RingKind,
+        reference: &str,
+        ttl: u32,
+    ) -> Result<()> {
+        let Some(reach) = self.plugins.reach(app_id) else {
+            return Err(invalid_ring("ringing needs permissions.deliver"));
+        };
+        if to.len() > RECIPIENTS {
+            return Err(invalid_ring(&format!("more than {RECIPIENTS} users at once")));
+        }
+        check_reference(reference)?;
+        let recipients = self.recipients(app_id, sender.id, &to, reach).await?;
+        if !self.events.count_rings(app_id, sender.id, recipients.len() as u32) {
+            return Err(Error::conflict("TOO_MANY_RINGS", "Too many rings a minute"));
+        }
+        let kind = match kind {
+            RingKind::Call => "call",
+            RingKind::Message => "message",
+            RingKind::Invite => "invite",
+        };
+        let from = app_events::From { id: sender.id, username: sender.username.clone() };
+        self.events.ring(app_id, from, &recipients, kind, reference, ttl);
+        Ok(())
+    }
+
+    /// Ends the sender's ring `reference` for each of `to`.
+    pub async fn cancel_ring(&self, app_id: &str, sender: Uuid, to: &[String], reference: &str) -> Result<()> {
+        check_reference(reference)?;
+        let to = self.users(to).await?;
+        self.events.cancel(app_id, sender, &to, reference);
+        Ok(())
+    }
+
+    /// The users `to` names (ids or usernames) who exist, each once.
+    async fn users(&self, to: &[String]) -> Result<Vec<Uuid>> {
         let (ids, names): (Vec<_>, Vec<_>) =
             to.iter().map(|name| name.trim()).partition(|n| Uuid::parse_str(n).is_ok());
         let ids: Vec<Uuid> = ids.iter().filter_map(|id| Uuid::parse_str(id).ok()).collect();
@@ -322,6 +369,13 @@ impl Jobs {
             .await?;
         found.sort();
         found.dedup();
+        Ok(found)
+    }
+
+    /// The users of `to` the sender may add jobs for: existing, within
+    /// `reach`, not blocking the sender; each once.
+    async fn recipients(&self, app_id: &str, sender: Uuid, to: &[String], reach: Reach) -> Result<Vec<Uuid>> {
+        let mut found = self.users(to).await?;
         if reach == Reach::Groups {
             let groups: Vec<Uuid> = group_member::Entity::find()
                 .select_only()
@@ -547,16 +601,19 @@ impl Jobs {
     }
 
     /// One worker: runs batches while there are any, then waits.
-    async fn work(self: Arc<Self>) {
+    /// `deliveries`: only jobs of `permissions.deliver`, the lane that keeps
+    /// them quick while the other workers are busy.
+    async fn work(self: Arc<Self>, deliveries: bool) {
         loop {
             // Listening before looking: jobs added in between still wake us.
             let wake = self.wake.notified();
             tokio::pin!(wake);
             wake.as_mut().enable();
-            match self.next_batch().await {
+            match self.next_batch(deliveries).await {
                 Ok(Some(batch)) => {
-                    let app_id = batch.app_id.clone();
+                    let (app_id, user_id) = (batch.app_id.clone(), batch.user_id);
                     self.run(batch).await;
+                    self.busy.lock().unwrap_or_else(|e| e.into_inner()).remove(&(app_id.clone(), user_id));
                     if let Some(count) = self.running().get_mut(&app_id) {
                         *count = count.saturating_sub(1);
                     }
@@ -578,7 +635,7 @@ impl Jobs {
     }
 
     /// Takes the next batch in turn and marks it running.
-    async fn next_batch(&self) -> Result<Option<Batch>> {
+    async fn next_batch(&self, deliveries: bool) -> Result<Option<Batch>> {
         let mut turn = self.turn.lock().await;
         let now = Utc::now();
         let ready: Vec<(String, Uuid, String)> = plugin_job::Entity::find()
@@ -592,12 +649,17 @@ impl Jobs {
             .await?;
         // Only plugins that run, below their number of batches at a time,
         // and kinds their manifest still has.
+        // Only users without a batch running, where the plugin asks so.
         let running = self.running().clone();
+        let busy = self.busy.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let ready: Vec<_> = ready
             .into_iter()
-            .filter(|(app_id, _, kind)| {
-                self.plugins.get(app_id).is_some_and(|m| m.jobs.iter().any(|k| &k.kind == kind))
-                    && self.plugins.host().runs_jobs(app_id)
+            .filter(|(app_id, user_id, kind)| {
+                self.plugins.get(app_id).is_some_and(|m| {
+                    m.jobs.iter().any(|k| &k.kind == kind)
+                        && (!deliveries || m.permissions.deliver.contains(kind))
+                        && !(m.one_batch_per_user && busy.contains(&(app_id.clone(), *user_id)))
+                }) && self.plugins.host().runs_jobs(app_id)
                     && running.get(app_id).copied().unwrap_or(0) < self.plugins.workers(app_id)
             })
             .collect();
@@ -627,6 +689,7 @@ impl Jobs {
             .exec(&self.db)
             .await?;
         *self.running().entry(app_id.clone()).or_default() += 1;
+        self.busy.lock().unwrap_or_else(|e| e.into_inner()).insert((app_id.clone(), user_id));
         Ok(Some(Batch { app_id, user_id, kind, rows }))
     }
 
@@ -672,12 +735,17 @@ impl Jobs {
             .collect();
 
         let (mut done, mut failed, mut again) = (Vec::new(), 0, 0);
+        // Whether something another user sent is in: the page may show it.
+        let mut delivered = false;
         match self.plugins.host().run_batch(&app_id, caller, jobs, origins, &config).await {
             Ok(outcomes) => {
                 let mut outcomes = outcomes.into_iter();
                 for row in rows {
                     match outcomes.next() {
-                        Some(JobOutcome::Done) => done.push(row.id),
+                        Some(JobOutcome::Done) => {
+                            delivered |= row.from_user_id.is_some();
+                            done.push(row.id);
+                        }
                         Some(JobOutcome::Failed(why)) => {
                             failed += 1;
                             self.keep(row, FAILED, Some(why), None).await;
@@ -706,6 +774,9 @@ impl Jobs {
             }
         }
         let finished = done.len();
+        if delivered {
+            self.events.changed(user_id, &app_id);
+        }
         if let Err(err) =
             plugin_job::Entity::delete_many().filter(plugin_job::Column::Id.is_in(done)).exec(&self.db).await
         {
@@ -812,6 +883,20 @@ impl Jobs {
         if let Err(err) = plugin_job::Entity::update(job).exec(&self.db).await {
             tracing::warn!(app = row.app_id, "plugin jobs: {err}");
         }
+    }
+}
+
+fn invalid_ring(message: &str) -> Error {
+    Error::bad_request("INVALID_RING", message.to_owned())
+}
+
+/// What the plugin calls a ring: 1–200 letters, digits or `-_.:`.
+fn check_reference(reference: &str) -> Result<()> {
+    let valid = (1..=200).contains(&reference.len())
+        && reference.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c));
+    match valid {
+        true => Ok(()),
+        false => Err(invalid_ring("a ref is 1–200 letters, digits or -_.:")),
     }
 }
 

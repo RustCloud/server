@@ -421,7 +421,7 @@ async fn only_the_owner_makes_public_links_and_only_the_owners_open() {
     let docs = s.files.create_folder(&s.alice, root.id, "Docs").await.unwrap();
     s.files.upload(&s.alice, docs.id, "secret.txt", body("secret"), false, None).await.unwrap();
     for write in [false, true] {
-        let access = NewAccess { username: Some("bob".into()), group_id: None, write };
+        let access = NewAccess { username: Some("bob".into()), write, ..Default::default() };
         s.files.grant_access(&s.alice, docs.id, access).await.unwrap();
         let options = ShareOptions { allow_upload: Some(true), ..Default::default() };
         let refused = s.files.create_share(&s.bob, docs.id, options).await;
@@ -439,6 +439,7 @@ async fn only_the_owner_makes_public_links_and_only_the_owners_open() {
         created_at: Set(chrono::Utc::now()),
         password_hash: Set(None),
         allow_upload: Set(true),
+        app: Set(None),
     }
     .insert(&s.db.conn)
     .await
@@ -456,7 +457,7 @@ async fn files_tell_whether_someone_else_wrote_them() {
     assert!(!s.files.from_someone_else(&s.alice, own.id).await.unwrap());
 
     let shared = s.files.create_folder(&s.alice, root.id, "Shared").await.unwrap();
-    let access = NewAccess { username: Some("bob".into()), group_id: None, write: true };
+    let access = NewAccess { username: Some("bob".into()), write: true, ..Default::default() };
     s.files.grant_access(&s.alice, shared.id, access).await.unwrap();
     let alices = s.files.upload(&s.alice, shared.id, "alices.pdf", body("%PDF"), false, None).await.unwrap();
     assert!(s.files.from_someone_else(&s.bob, alices.id).await.unwrap(), "shared with bob: alice's");
@@ -1326,7 +1327,7 @@ async fn uploads_in_parts_into_a_shared_folder_fit_the_owners_quota() {
     let alice = User::from(alice.update(&s.db.conn).await.unwrap());
     let root = s.files.root(&alice).await.unwrap();
     let shared = s.files.create_folder(&alice, root.id, "Shared").await.unwrap();
-    let access = NewAccess { username: Some("bob".into()), group_id: None, write: true };
+    let access = NewAccess { username: Some("bob".into()), write: true, ..Default::default() };
     s.files.grant_access(&alice, shared.id, access).await.unwrap();
 
     let too_large = s.files.start_upload(&s.bob, shared.id, new_upload("big", 11)).await;
@@ -1386,4 +1387,51 @@ async fn only_a_few_folders_are_zipped_at_once() {
     assert!(done.iter().map(Bytes::len).sum::<usize>() > 1 << 20);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(files.download_zip(&s.alice, folder.id).await.is_ok());
+}
+
+#[tokio::test]
+async fn plugins_end_and_show_only_shares_made_through_them() {
+    let s = setup().await;
+    let root = s.files.root(&s.alice).await.unwrap();
+    let photo = s.files.upload(&s.alice, root.id, "photo.jpg", body("jpeg"), false, None).await.unwrap();
+    let notes = s.files.upload(&s.alice, root.id, "notes.txt", body("text"), false, None).await.unwrap();
+    let via_talk = NewAccess { username: Some("bob".into()), app: Some("talk".into()), ..Default::default() };
+    let talk = s.files.grant_access(&s.alice, photo.id, via_talk).await.unwrap();
+    assert_eq!(talk.app.as_deref(), Some("talk"));
+    let by_hand = NewAccess { username: Some("bob".into()), ..Default::default() };
+    let files = s.files.grant_access(&s.alice, notes.id, by_hand).await.unwrap();
+    assert_eq!(s.files.shared_with_me(&s.bob).await.unwrap()[1].app.as_deref(), Some("talk"));
+
+    // Talk may show the photo's thumbnail to bob and alice, not the notes, and not another app.
+    assert!(s.files.app_shared_file(&s.bob, "talk", photo.id).await.is_ok());
+    assert!(s.files.app_shared_file(&s.alice, "talk", photo.id).await.is_ok());
+    assert_eq!(code_of(s.files.app_shared_file(&s.bob, "talk", notes.id).await), "FILE_NOT_FOUND");
+    assert_eq!(code_of(s.files.app_shared_file(&s.bob, "notes", photo.id).await), "FILE_NOT_FOUND");
+
+    // Talk ends what was shared through it, for its owner only.
+    assert_eq!(code_of(s.files.remove_app_share(&s.alice, "talk", files.id).await), "SHARE_NOT_FOUND");
+    assert_eq!(code_of(s.files.remove_app_share(&s.bob, "talk", talk.id).await), "SHARE_NOT_FOUND");
+    assert_eq!(code_of(s.files.remove_app_share(&s.alice, "notes", talk.id).await), "SHARE_NOT_FOUND");
+    s.files.remove_app_share(&s.alice, "talk", talk.id).await.unwrap();
+    assert_eq!(code_of(s.files.app_shared_file(&s.bob, "talk", photo.id).await), "FILE_NOT_FOUND");
+    assert_eq!(s.files.shared_with_me(&s.bob).await.unwrap().len(), 1, "the notes stay");
+
+    // Public links too.
+    let link = ShareOptions { app: Some("talk".into()), ..Default::default() };
+    let link = s.files.create_share(&s.alice, photo.id, link).await.unwrap();
+    s.files.remove_app_share(&s.alice, "talk", link.id).await.unwrap();
+    assert!(s.files.shares(&s.alice).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn owners_see_all_they_shared_with_people() {
+    let s = setup().await;
+    let root = s.files.root(&s.alice).await.unwrap();
+    let photo = s.files.upload(&s.alice, root.id, "photo.jpg", body("jpeg"), false, None).await.unwrap();
+    let via_talk = NewAccess { username: Some("bob".into()), app: Some("talk".into()), ..Default::default() };
+    s.files.grant_access(&s.alice, photo.id, via_talk).await.unwrap();
+    let given = s.files.given_access(&s.alice).await.unwrap();
+    assert_eq!(given.len(), 1);
+    assert_eq!((given[0].node.name.as_str(), given[0].access.app.as_deref()), ("photo.jpg", Some("talk")));
+    assert!(s.files.given_access(&s.bob).await.unwrap().is_empty());
 }

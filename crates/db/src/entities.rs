@@ -211,6 +211,8 @@ pub mod share {
         pub password_hash: Option<String>,
         /// Whether visitors may upload files into the shared folder.
         pub allow_upload: bool,
+        /// The plugin it was made through (`rustcloud.shareLink`); `None`: in Files.
+        pub app: Option<String>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -482,6 +484,8 @@ pub mod file_share {
         pub username: Option<String>,
         pub write: bool,
         pub created_at: DateTimeUtc,
+        /// The plugin it was made through (`rustcloud.shareFile`); `None`: in Files.
+        pub app: Option<String>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -509,6 +513,26 @@ pub mod plugin_config {
         /// Whom its users may add jobs for (`jobs.add-for`): `all` users, or
         /// `groups`: only those they share a group with.
         pub reach: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// The number a plugin shows by its entry in the side panel for a user
+/// (`notify.badge`): unread messages, say.
+pub mod plugin_badge {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "plugin_badges")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub app_id: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub user_id: Uuid,
+        pub count: i32,
+        pub updated_at: DateTimeUtc,
     }
 
     impl ActiveModelBehavior for ActiveModel {}

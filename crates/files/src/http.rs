@@ -25,7 +25,7 @@ use crate::changes::{ChangePage, ChangeWatch, HINT_EVERY, WATCH_TIME};
 use crate::content;
 use crate::service::{Files, Node, NodeUpdate, Usage};
 use crate::shares::{PublicView, Share, ShareOptions, LINK_COOKIE};
-use crate::sharing::{Access, NewAccess, Received};
+use crate::sharing::{Access, Given, NewAccess, Received};
 use crate::storage::{SpeedTestResult, StorageReport};
 use crate::uploads::{NewUpload, Upload};
 use crate::versions::Versions;
@@ -45,6 +45,8 @@ where
         .route("/api/v1/files/trash", get(trash).delete(empty_trash))
         .route("/api/v1/files/shared", get(shared_with_me))
         .route("/api/v1/files/{id}/access", get(node_access).post(grant_access))
+        .route("/api/v1/access", get(given_access))
+        .route("/api/v1/apps/{app}/shares/{id}", delete(remove_app_share))
         .route("/api/v1/access/{id}", patch(change_access).delete(remove_access))
         .route("/api/v1/files/{id}", get(details).patch(update).delete(remove))
         .route("/api/v1/files/{id}/children", get(children))
@@ -450,6 +452,22 @@ async fn change_access(
     Json(change): Json<AccessChange>,
 ) -> Result<Json<Access>> {
     Ok(Json(files.change_access(current.user(), id, change.write).await?))
+}
+
+/// `DELETE /api/v1/apps/{app}/shares/{id}`: the panel ends, for an app's
+/// page (`rustcloud.unshare`), a share or public link made through that app.
+async fn remove_app_share(
+    State(files): State<Arc<Files>>,
+    current: CurrentUser,
+    Path((app, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode> {
+    files.remove_app_share(current.user(), &app, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/v1/access`: everything the user shared with people, newest first.
+async fn given_access(State(files): State<Arc<Files>>, current: CurrentUser) -> Result<Json<Vec<Given>>> {
+    Ok(Json(files.given_access(current.user()).await?))
 }
 
 async fn remove_access(

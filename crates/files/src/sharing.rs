@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use rustcloud_auth::User;
 use rustcloud_core::{audit, Error, Result};
-use rustcloud_db::{file_share, group, group_member, node, user};
-use sea_orm::{ActiveModelTrait, ColumnTrait, Condition, EntityTrait, QueryFilter, Set};
+use rustcloud_db::{file_share, group, group_member, node, share, user};
+use sea_orm::{ActiveModelTrait, ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -47,15 +47,23 @@ pub struct Access {
     pub group: Option<GroupRef>,
     pub write: bool,
     pub created_at: DateTime<Utc>,
+    /// The plugin it was made through (`rustcloud.shareFile`); `None`: in Files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 /// Whom the owner shares with: a username or one of their groups.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct NewAccess {
     pub username: Option<String>,
     pub group_id: Option<Uuid>,
     #[serde(default)]
     pub write: bool,
+    /// The plugin the owner shares through (the panel's dialog for
+    /// `rustcloud.shareFile`): it may end the share and show the file's
+    /// thumbnail to the people it reaches. Kept only for a new share.
+    #[serde(default)]
+    pub app: Option<String>,
 }
 
 /// A share as its recipient sees it.
@@ -67,6 +75,17 @@ pub struct Received {
     pub write: bool,
     /// The group it came through; `None`: shared with the user.
     pub group: Option<GroupRef>,
+    /// The plugin it was made through; `None`: in Files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+}
+
+/// A share as its owner sees it in the list of all they shared: with the node.
+#[derive(Debug, Clone, Serialize)]
+pub struct Given {
+    #[serde(flatten)]
+    pub access: Access,
+    pub node: Node,
 }
 
 /// How a user reaches a node.
@@ -104,6 +123,7 @@ impl Files {
             username: Set(None),
             write: Set(new.write),
             created_at: Set(Utc::now()),
+            app: Set(new.app.clone().filter(|app| !app.is_empty())),
         };
         let existing = file_share::Entity::find().filter(file_share::Column::NodeId.eq(node.id));
         let (existing, with) = match (new.username.as_deref().map(str::trim), new.group_id) {
@@ -142,7 +162,7 @@ impl Files {
             }
             None => row.insert(&self.db).await?,
         };
-        audit!("access.grant", name = node.name, with, write = new.write, "shared");
+        audit!("access.grant", name = node.name, with, write = new.write, app = new.app.as_deref(), "shared");
         Ok(self.to_access(vec![row]).await?.remove(0))
     }
 
@@ -169,6 +189,72 @@ impl Files {
         let by = if row.owner_id == user.id { "owner" } else { "recipient" };
         audit!("access.revoke", by, "no longer shared");
         Ok(())
+    }
+
+    /// Everything the owner shared with people (not public links), newest first.
+    pub async fn given_access(&self, owner: &User) -> Result<Vec<Given>> {
+        let rows = file_share::Entity::find()
+            .filter(file_share::Column::OwnerId.eq(owner.id))
+            .order_by_desc(file_share::Column::CreatedAt)
+            .all(&self.db)
+            .await?;
+        let nodes: HashMap<Uuid, node::Model> = node::Entity::find()
+            .filter(node::Column::Id.is_in(rows.iter().map(|row| row.node_id)))
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect();
+        let access = self.to_access(rows).await?;
+        Ok(access
+            .into_iter()
+            .filter_map(|access| {
+                let node = nodes.get(&access.node_id).filter(|node| node.trashed_at.is_none())?.clone().into();
+                Some(Given { access, node })
+            })
+            .collect())
+    }
+
+    /// Ends a share or public link the user made through `app` (the
+    /// plugin's `unshare`): not one they made in Files or through another
+    /// plugin. Only takes access away, so the plugin needs no dialog.
+    pub async fn remove_app_share(&self, user: &User, app: &str, id: Uuid) -> Result<()> {
+        let access = file_share::Entity::delete_many()
+            .filter(file_share::Column::Id.eq(id))
+            .filter(file_share::Column::OwnerId.eq(user.id))
+            .filter(file_share::Column::App.eq(app))
+            .exec(&self.db)
+            .await?;
+        let link = share::Entity::delete_many()
+            .filter(share::Column::Id.eq(id))
+            .filter(share::Column::OwnerId.eq(user.id))
+            .filter(share::Column::App.eq(app))
+            .exec(&self.db)
+            .await?;
+        if access.rows_affected + link.rows_affected == 0 {
+            return Err(share_not_found());
+        }
+        audit!("access.revoke", by = "owner", app, "no longer shared");
+        Ok(())
+    }
+
+    /// A file the user reaches (their own or shared with them) that was
+    /// shared through `app`, with someone the share reaches: the plugin may
+    /// show its thumbnail, not its content.
+    pub async fn app_shared_file(&self, user: &User, app: &str, id: Uuid) -> Result<Node> {
+        let node = self.readable(user, id).await?;
+        let groups = self.group_ids(user.id).await?;
+        let reaches = Condition::any().add(file_share::Column::OwnerId.eq(user.id)).add(recipient(user.id, &groups));
+        let shared = file_share::Entity::find()
+            .filter(file_share::Column::NodeId.eq(node.id))
+            .filter(file_share::Column::App.eq(app))
+            .filter(reaches)
+            .one(&self.db)
+            .await?;
+        match (shared, node.is_dir) {
+            (Some(_), false) => Ok(node.into()),
+            _ => Err(not_found()),
+        }
     }
 
     /// What others shared with the user, directly or through groups.
@@ -218,6 +304,7 @@ impl Files {
                 },
                 write: row.write,
                 group,
+                app: row.app.clone(),
             });
         }
         received.sort_by_cached_key(|item| item.node.name.to_lowercase());
@@ -332,7 +419,15 @@ impl Files {
                     (None, None) => None,
                 };
                 let group = row.group_id.map(|id| GroupRef { id, name: groups.get(&id).cloned().unwrap_or_default() });
-                Access { id: row.id, node_id: row.node_id, user, group, write: row.write, created_at: row.created_at }
+                Access {
+                    id: row.id,
+                    node_id: row.node_id,
+                    user,
+                    group,
+                    write: row.write,
+                    created_at: row.created_at,
+                    app: row.app,
+                }
             })
             .collect())
     }

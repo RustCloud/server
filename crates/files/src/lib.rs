@@ -90,7 +90,7 @@ pub use locks::{FileLock, Locking, LOCK_MAX};
 pub use service::{guess_mime, Download, Files, Node, NodeUpdate, Usage};
 pub use settings::FilesSettings;
 pub use shares::{PublicView, Share, ShareOptions, LINK_COOKIE};
-pub use sharing::{Access, GroupRef, NewAccess, Received};
+pub use sharing::{Access, Given, GroupRef, NewAccess, Received};
 pub use storage::{SpeedTestResult, StorageReport, NEARLY_FULL_PERCENT, SPEED_TEST_BYTES};
 pub use trash::TRASH_FOLDER;
 pub use uploads::{NewUpload, Upload, ABANDONED_AFTER, MAX_PARTS, MAX_UPLOADS};

@@ -11,6 +11,8 @@
   import { allowedHeaders, ANSWER_HEADERS, appRequestUrl, BODY_LIMIT, requestBody, type BridgeRequest } from '../lib/bridge';
   import AccessDialog from './AccessDialog.svelte';
   import AppShareDialog from './AppShareDialog.svelte';
+  import AppShareFileDialog, { type ShareResult } from './AppShareFileDialog.svelte';
+  import { onChanged } from '../lib/appEvents.svelte';
   import Dialog from './Dialog.svelte';
   import { errorText, locale, t } from '../lib/i18n';
   import { go } from '../lib/router.svelte';
@@ -46,6 +48,17 @@
   let accessRequest = $state<{ id: number; folder: string; write: boolean } | null>(null);
   /** A folder of the app's data the page offers to share, while the dialog is open. */
   let shareRequest = $state<{ id: number; path: string; label: string } | null>(null);
+  /** A file the page asks to share through the app, or a public link to one. */
+  let fileShareRequest = $state<{
+    id: number;
+    mode: 'file' | 'link';
+    people: string[];
+    upload?: File;
+    write: boolean;
+  } | null>(null);
+
+  // Someone sent the user something in this app: the page may show it.
+  $effect(() => onChanged((app) => app === id && reply({ rustcloud: 'event', type: 'changed' })));
   const src = $derived(`/app/${encodeURIComponent(id)}/${path}${query ? '?' + query : ''}`);
   /** The most a request of the page may carry: what the app takes at once. */
   const bodyLimit = $derived(apps.limits[id]?.data_bytes ?? BODY_LIMIT);
@@ -97,6 +110,23 @@
       } else {
         accessRequest = { id: message.id, folder, write: message.write === true };
       }
+    } else if ((message.rustcloud === 'share-file' || message.rustcloud === 'share-link') && typeof message.id === 'number') {
+      const people = Array.isArray(message.with) ? message.with.filter((p: unknown) => typeof p === 'string') : [];
+      const upload = message.upload instanceof File ? message.upload : undefined;
+      if (fileShareRequest || shareRequest || accessRequest) {
+        reply({ rustcloud: 'error', id: message.id, message: 'Another request is waiting for the user' });
+      } else if (people.length > 50) {
+        reply({ rustcloud: 'error', id: message.id, message: 'At most 50 people at once' });
+      } else {
+        const mode = message.rustcloud === 'share-file' ? 'file' : 'link';
+        fileShareRequest = { id: message.id, mode, people, upload, write: message.write === true };
+      }
+    } else if (message.rustcloud === 'unshare' && typeof message.id === 'number') {
+      const requestId = message.id;
+      api
+        .removeAppShare(id, String(message.share))
+        .then(() => reply({ rustcloud: 'result', id: requestId, value: null }))
+        .catch((e) => reply({ rustcloud: 'error', id: requestId, message: errorText(e) }));
     } else if (message.rustcloud === 'share' && typeof message.id === 'number') {
       if (typeof message.path !== 'string' || !message.path) {
         reply({ rustcloud: 'error', id: message.id, message: 'share needs the path of a folder' });
@@ -316,6 +346,28 @@
     write={accessRequest.write}
     ongranted={accessGranted}
     onclose={accessDenied}
+  />
+{/if}
+
+{#if fileShareRequest}
+  {@const request = fileShareRequest}
+  <AppShareFileDialog
+    appId={id}
+    appTitle={title}
+    mode={request.mode}
+    people={request.people}
+    upload={request.upload}
+    write={request.write}
+    ondone={(result: ShareResult | null) => {
+      fileShareRequest = null;
+      if (!result) {
+        reply({ rustcloud: 'error', id: request.id, message: 'The user declined' });
+      } else {
+        const { kind, ...value } = result;
+        void kind;
+        reply({ rustcloud: 'result', id: request.id, value });
+      }
+    }}
   />
 {/if}
 

@@ -66,6 +66,10 @@ pub enum Target {
     /// A file of the app's storage.
     #[serde(rename = "s")]
     Storage(String),
+    /// The thumbnail of a file shared through the app (`links.thumbnail`),
+    /// not its content.
+    #[serde(rename = "t")]
+    Thumbnail(Uuid),
 }
 
 impl Target {
@@ -239,6 +243,16 @@ impl AppLinks {
         Ok((format!("/api/v1/app-links/{}", self.token(&claims)?), file))
     }
 
+    /// A link for the page of `app_id` in `session` to the thumbnail of a
+    /// file shared through the app that the user reaches.
+    pub async fn create_thumbnail(&self, session: Uuid, user: &User, app_id: &str, id: Uuid) -> Result<String> {
+        let target = Target::Thumbnail(id);
+        let file = self.file(Some(user), app_id, &target).await?;
+        let e = file.etag.clone().unwrap_or_default();
+        let claims = Claims { s: session, a: app_id.to_owned(), t: target, e, m: None, x: link_end() };
+        Ok(format!("/api/v1/app-links/{}", self.token(&claims)?))
+    }
+
     /// A link for the page of `app_id` in `session` to upload `name` into
     /// `folder`, if the app may.
     pub async fn create_upload(
@@ -324,6 +338,7 @@ impl AppLinks {
             (Target::Storage(path), _) => self.storage.file(app_id, path).await?,
             (Target::File(id), Some(user)) => self.files.app_get(user, app_id, *id).await?,
             (Target::AppData(path), Some(user)) => self.files.appdata_file(user, app_id, path).await?,
+            (Target::Thumbnail(id), Some(user)) => self.files.app_shared_file(user, app_id, *id).await?,
             (_, None) => return Err(Error::not_found("FILE_NOT_FOUND", "File not found")),
         };
         match file.is_dir {
@@ -355,7 +370,8 @@ impl AppLinks {
             (Target::Storage(path), _) => self.storage.download(app_id, path, range).await,
             (Target::File(id), Some(user)) => self.files.app_download(user, app_id, *id, range).await,
             (Target::AppData(path), Some(user)) => self.files.appdata_download(user, app_id, path, range).await,
-            (_, None) => Err(Error::not_found("FILE_NOT_FOUND", "File not found")),
+            // Never the content of what only its thumbnail was shared for.
+            (Target::Thumbnail(_), _) | (_, None) => Err(Error::not_found("FILE_NOT_FOUND", "File not found")),
         }
     }
 
@@ -365,6 +381,7 @@ impl AppLinks {
             Target::Storage(path) => self.storage.open(app_id, path).await,
             Target::File(id) => Ok(self.files.app_open(user, app_id, *id).await?.0),
             Target::AppData(path) => self.files.appdata_open(user, app_id, path).await,
+            Target::Thumbnail(_) => Err(Error::not_found("FILE_NOT_FOUND", "File not found")),
         }
     }
 
@@ -457,6 +474,11 @@ async fn follow(State(state): State<AppState>, Path(token): Path<String>, reques
     let (claims, user) = check(&state, &token).await?;
     if claims.m.is_some() {
         return Err(gone());
+    }
+    if let Target::Thumbnail(id) = claims.t {
+        let (node, file) = state.files.open_for_media(&user, id).await?;
+        let answer = crate::thumbnails::answer(&state.thumbnails, &node, file, Default::default(), &request).await?;
+        return Ok(for_pages(answer));
     }
     Ok(for_pages(state.links.send(Some(&user), &claims.a, &claims.t, &request).await?))
 }

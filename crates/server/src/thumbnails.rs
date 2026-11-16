@@ -218,7 +218,8 @@ async fn public_thumbnail(
     answer(&state.thumbnails, &node, file, params.size, &headers).await
 }
 
-async fn answer(
+/// A thumbnail as an answer, with its ETag; `304` if the browser has it.
+pub(crate) async fn answer(
     thumbnails: &Thumbnails,
     node: &Node,
     file: std::fs::File,

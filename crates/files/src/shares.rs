@@ -53,6 +53,9 @@ pub struct Share {
     pub has_password: bool,
     /// Whether visitors may upload into the folder.
     pub allow_upload: bool,
+    /// The plugin it was made through (`rustcloud.shareLink`); `None`: in Files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 /// A new public link, or changes to one (`None`: as it is).
@@ -64,6 +67,10 @@ pub struct ShareOptions {
     /// `Some("")`: no password.
     pub password: Option<String>,
     pub allow_upload: Option<bool>,
+    /// The plugin a new link is made through (the panel's dialog for
+    /// `rustcloud.shareLink`): it may end the link. Not changed later.
+    #[serde(default)]
+    pub app: Option<String>,
 }
 
 /// What a visitor of a public link sees.
@@ -99,6 +106,7 @@ impl Files {
             created_at: Set(Utc::now()),
             password_hash: Set(None),
             allow_upload: Set(false),
+            app: Set(options.app.clone().filter(|app| !app.is_empty())),
         };
         apply_options(&mut row, &node, &options).await?;
         let row = row.insert(&self.db).await?;
@@ -345,6 +353,7 @@ fn to_share(row: share::Model, node: Node) -> Share {
         node,
         has_password: row.password_hash.is_some(),
         allow_upload: row.allow_upload,
+        app: row.app,
     }
 }
 

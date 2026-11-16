@@ -7,6 +7,7 @@
 
 mod accounts;
 mod app_bodies;
+mod app_events;
 mod app_links;
 mod app_passwords;
 mod app_routes;
@@ -202,6 +203,7 @@ pub fn app(state: AppState) -> Router {
         .merge(thumbnails::router())
         .merge(app_routes::router())
         .merge(app_links::router())
+        .merge(app_events::router())
         .route("/api/v1/info", get(info))
         .route("/api/v1/apps", get(list_apps))
         .route("/.well-known/{name}", any(well_known))

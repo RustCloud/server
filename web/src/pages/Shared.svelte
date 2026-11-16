@@ -1,6 +1,7 @@
 <!-- What other people shared with the user, directly or through a group. -->
 <script lang="ts">
   import { api, type FileNode, type Received } from '../lib/api';
+  import { appName } from '../lib/apps.svelte';
   import { errorText, t } from '../lib/i18n';
   import { go } from '../lib/router.svelte';
   import FileList from '../components/FileList.svelte';
@@ -46,7 +47,9 @@
       {@const item = received?.find((r) => r.node.id === node.id)}
       {#if item}
         <span class="muted small">
-          {item.owner.display_name}{item.group ? ` · ${item.group.name}` : ''}{item.write ? '' : ` · ${t.readOnlyShare}`}
+          {item.owner.display_name}{item.group ? ` · ${item.group.name}` : ''}{item.write ? '' : ` · ${t.readOnlyShare}`}{item.app
+            ? ` · ${t.viaApp(appName(item.app))}`
+            : ''}
         </span>
         {#if !item.group}
           <button type="button" class="small" onclick={() => leave(item)}>{t.leaveShare}</button>

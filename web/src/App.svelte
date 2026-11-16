@@ -8,6 +8,8 @@
   import { loadStorage, percentText, storage } from './lib/storage.svelte';
   import { loadSession, session } from './lib/session.svelte';
   import AppFrame from './components/AppFrame.svelte';
+  import RingToasts from './components/RingToasts.svelte';
+  import { connectAppEvents } from './lib/appEvents.svelte';
   import { apps } from './lib/apps.svelte';
   import Sidebar from './components/Sidebar.svelte';
   import TopBar from './components/TopBar.svelte';
@@ -36,6 +38,12 @@
     if (!session.user) return;
     loadServerInfo();
     loadApps();
+  });
+
+  // Badges, rings and news of the user's plugins, while logged in.
+  $effect(() => {
+    if (!session.user) return;
+    return connectAppEvents();
   });
 
   // Administrators get a warning when the storage disk is nearly full.
@@ -101,6 +109,7 @@
       </main>
     </div>
   </div>
+  <RingToasts />
 {/if}
 
 <style>

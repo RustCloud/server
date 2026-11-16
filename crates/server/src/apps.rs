@@ -117,6 +117,8 @@ mod tests {
             new_files: Vec::new(),
             status: None,
             proxy: Vec::new(),
+            one_batch_per_user: false,
+            webhooks: Vec::new(),
         }
     }
 

@@ -1,4 +1,4 @@
-<!-- Dialog for choosing a target folder (move / copy). -->
+<!-- Dialog for choosing a target folder (move / copy), or with `onchoosefile` a file. -->
 <script lang="ts">
   import { api, type FileNode } from '../lib/api';
   import { errorText, t } from '../lib/i18n';
@@ -10,6 +10,7 @@
     startId,
     exclude,
     onchoose,
+    onchoosefile,
     onclose,
   }: {
     title: string;
@@ -17,6 +18,8 @@
     /** Folders that may not be chosen or entered (the ones being moved). */
     exclude: string[];
     onchoose: (folder: FileNode) => void;
+    /** Lists files too; choosing one calls this. */
+    onchoosefile?: (file: FileNode) => void;
     onclose: () => void;
   } = $props();
 
@@ -28,7 +31,7 @@
     try {
       const details = await api.details(id);
       current = details.node;
-      folders = (await api.children(id)).filter((n) => n.is_dir && !exclude.includes(n.id));
+      folders = (await api.children(id)).filter((n) => (n.is_dir || onchoosefile) && !exclude.includes(n.id));
       error = '';
     } catch (e) {
       error = errorText(e);
@@ -52,8 +55,12 @@
     <ul>
       {#each folders as folder (folder.id)}
         <li>
-          <button type="button" class="link" onclick={() => open(folder.id)}>
-            <Icon name="folder" />
+          <button
+            type="button"
+            class="link"
+            onclick={() => (folder.is_dir ? open(folder.id) : onchoosefile?.(folder))}
+          >
+            <Icon name={folder.is_dir ? 'folder' : 'file'} />
             {folder.name}
           </button>
         </li>
@@ -63,9 +70,11 @@
   {#if error}<p class="error">{error}</p>{/if}
   <footer>
     <button type="button" onclick={onclose}>{t.cancel}</button>
-    <button type="button" class="primary" disabled={!current} onclick={() => current && onchoose(current)}>
-      {t.chooseFolder}
-    </button>
+    {#if !onchoosefile}
+      <button type="button" class="primary" disabled={!current} onclick={() => current && onchoose(current)}>
+        {t.chooseFolder}
+      </button>
+    {/if}
   </footer>
 </Dialog>
 

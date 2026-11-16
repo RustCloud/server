@@ -43,6 +43,8 @@ export interface Share {
   node: FileNode;
   has_password: boolean;
   allow_upload: boolean;
+  /** The plugin it was made through; missing: in Files. */
+  app?: string;
 }
 
 /** A person as shares show them. */
@@ -60,6 +62,8 @@ export interface Access {
   group: { id: string; name: string } | null;
   write: boolean;
   created_at: string;
+  /** The plugin it was made through; missing: in Files. */
+  app?: string;
 }
 
 /** What someone shared with the user. */
@@ -69,6 +73,8 @@ export interface Received {
   owner: Person;
   write: boolean;
   group: { id: string; name: string } | null;
+  /** The plugin it was made through; missing: in Files. */
+  app?: string;
 }
 
 export interface Group {
@@ -83,6 +89,8 @@ export interface ShareOptions {
   /** Empty: no password. */
   password?: string;
   allow_upload?: boolean;
+  /** The plugin a new link is made through (`rustcloud.shareLink`). */
+  app?: string;
 }
 
 export interface PublicView {
@@ -694,10 +702,14 @@ export const api = {
   },
   sharedWithMe: () => request<Received[]>('GET', '/api/v1/files/shared'),
   nodeAccess: (id: string) => request<Access[]>('GET', `/api/v1/files/${id}/access`),
-  grantAccess: (id: string, to: { username?: string; group_id?: string; write: boolean }) =>
+  grantAccess: (id: string, to: { username?: string; group_id?: string; write: boolean; app?: string }) =>
     request<Access>('POST', `/api/v1/files/${id}/access`, to),
   changeAccess: (id: string, write: boolean) => request<Access>('PATCH', `/api/v1/access/${id}`, { write }),
   removeAccess: (id: string) => request<void>('DELETE', `/api/v1/access/${id}`),
+  declineRing: (id: string) => request<void>('DELETE', `/api/v1/apps/rings/${id}`),
+  removeAppShare: (app: string, id: string) =>
+    request<void>('DELETE', `/api/v1/apps/${enc(app)}/shares/${enc(id)}`),
+  givenAccess: () => request<(Access & { node: FileNode })[]>('GET', '/api/v1/access'),
   myGroups: () => request<{ id: string; name: string }[]>('GET', '/api/v1/groups'),
   groups: () => request<Group[]>('GET', '/api/v1/admin/groups'),
   createGroup: (name: string) => request<Group>('POST', '/api/v1/admin/groups', { name }),

@@ -50,3 +50,9 @@ export async function loadApps() {
     // Keep what is shown; the next login tries again.
   }
 }
+
+/** An app's name in the user's language, also for apps without an entry in the side panel. */
+export function appName(id: string): string {
+  const name = apps.manifests.find((app) => app.id === id)?.name;
+  return name?.[locale] ?? name?.en ?? id;
+}
