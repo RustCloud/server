@@ -114,7 +114,7 @@
 
     {#if mode === 'file'}
       <p>{t.shareWithPeople(people.join(', '))}</p>
-      <label class="small"><input type="checkbox" bind:checked={write} /> {t.shareAllowChanges}</label>
+      <label class="check small"><input type="checkbox" bind:checked={write} /> {t.shareAllowChanges}</label>
     {:else}
       <label class="small">
         {t.linkExpires}
@@ -167,6 +167,12 @@
   }
   .form p {
     margin: 0;
+  }
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text);
   }
   footer {
     display: flex;

@@ -706,7 +706,7 @@ export const api = {
     request<Access>('POST', `/api/v1/files/${id}/access`, to),
   changeAccess: (id: string, write: boolean) => request<Access>('PATCH', `/api/v1/access/${id}`, { write }),
   removeAccess: (id: string) => request<void>('DELETE', `/api/v1/access/${id}`),
-  declineRing: (id: string) => request<void>('DELETE', `/api/v1/apps/rings/${id}`),
+  endRing: (id: string) => request<void>('DELETE', `/api/v1/apps/rings/${id}`),
   removeAppShare: (app: string, id: string) =>
     request<void>('DELETE', `/api/v1/apps/${enc(app)}/shares/${enc(id)}`),
   givenAccess: () => request<(Access & { node: FileNode })[]>('GET', '/api/v1/access'),

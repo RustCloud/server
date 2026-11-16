@@ -275,7 +275,8 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/api/v1/apps/events", get(watch)).route("/api/v1/apps/rings/{id}", delete(decline))
 }
 
-/// `DELETE /api/v1/apps/rings/{id}`: the user declined a ring; it goes from all their tabs.
+/// `DELETE /api/v1/apps/rings/{id}`: the user opened or declined a ring; it
+/// goes from all their tabs.
 async fn decline(State(state): State<AppState>, current: CurrentUser, Path(id): Path<Uuid>) -> StatusCode {
     state.jobs.events.decline(current.user().id, id);
     StatusCode::NO_CONTENT

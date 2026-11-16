@@ -5,7 +5,7 @@
 -->
 <script lang="ts">
   import { appName } from '../lib/apps.svelte';
-  import { appEvents, declineRing, forgetEndedRings, type Ring } from '../lib/appEvents.svelte';
+  import { appEvents, endRing, forgetEndedRings, type Ring } from '../lib/appEvents.svelte';
   import { t } from '../lib/i18n';
   import { go } from '../lib/router.svelte';
 
@@ -14,8 +14,9 @@
     return () => clearInterval(timer);
   });
 
+  /** Opened in one tab: the others stop ringing too. */
   function open(ring: Ring) {
-    appEvents.rings = appEvents.rings.filter((r) => r.id !== ring.id);
+    endRing(ring);
     go(`/app/${encodeURIComponent(ring.app)}?ring=${encodeURIComponent(ring.ref)}`);
   }
 </script>
@@ -29,7 +30,7 @@
         </p>
         <div class="actions">
           <button type="button" class="primary small" onclick={() => open(ring)}>{t.ringOpen}</button>
-          <button type="button" class="small" onclick={() => declineRing(ring)}>{t.ringDecline}</button>
+          <button type="button" class="small" onclick={() => endRing(ring)}>{t.ringDecline}</button>
         </div>
       </div>
     {/each}

@@ -279,6 +279,11 @@ impl Guest for Echo {
                 Ok(()) => text(200, "ended"),
                 Err(err) => text(404, format!("{err:?}")),
             },
+            // A link to the thumbnail of a file shared through this app: `?<file id>`.
+            "/thumbnail" => match links::thumbnail(&request.query) {
+                Ok(link) => text(200, link),
+                Err(err) => text(404, format!("{err:?}")),
+            },
             // A webhook (`webhooks` in the manifest): who calls, and what came in
             // `x-rustcloud-authorization`.
             "/hook" => {

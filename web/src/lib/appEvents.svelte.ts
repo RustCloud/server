@@ -73,11 +73,14 @@ export function connectAppEvents(): () => void {
   };
 }
 
-/** Takes a ring away: in this tab now, in the others through the server. */
-export async function declineRing(ring: Ring) {
+/**
+ * Takes a ring away, when the user opened or declined it: in this tab now, in
+ * the others (and on other devices) through the server.
+ */
+export async function endRing(ring: Ring) {
   appEvents.rings = appEvents.rings.filter((r) => r.id !== ring.id);
   try {
-    await api.declineRing(ring.id);
+    await api.endRing(ring.id);
   } catch {
     // It ends by itself.
   }

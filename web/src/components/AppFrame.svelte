@@ -257,6 +257,20 @@
     shareRequest = null;
   }
 
+  /** The share dialog ended: its result (or the refusal) to the page. */
+  function fileShared(result: ShareResult | null) {
+    if (!fileShareRequest) return;
+    const id = fileShareRequest.id;
+    fileShareRequest = null;
+    if (!result) {
+      reply({ rustcloud: 'error', id, message: 'The user declined' });
+    } else {
+      const { kind, ...value } = result;
+      void kind;
+      reply({ rustcloud: 'result', id, value });
+    }
+  }
+
   function accessGranted(grant: Grant) {
     if (!accessRequest) return;
     reply({ rustcloud: 'access', id: accessRequest.id, folder: { id: grant.node.id, name: grant.node.name } });
@@ -358,16 +372,7 @@
     people={request.people}
     upload={request.upload}
     write={request.write}
-    ondone={(result: ShareResult | null) => {
-      fileShareRequest = null;
-      if (!result) {
-        reply({ rustcloud: 'error', id: request.id, message: 'The user declined' });
-      } else {
-        const { kind, ...value } = result;
-        void kind;
-        reply({ rustcloud: 'result', id: request.id, value });
-      }
-    }}
+    ondone={fileShared}
   />
 {/if}
 
