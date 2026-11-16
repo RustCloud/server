@@ -3,7 +3,7 @@
 // The server instantiates the app for each request to its routes
 // (`/app/<id>/...`) and calls `handle`. The app reaches the server only
 // through the interfaces it imports here; everything else is denied.
-package rustcloud:app@0.2.18;
+package rustcloud:app@0.2.19;
 
 interface types {
     /// An HTTP request to the app's routes.
@@ -60,7 +60,8 @@ interface appdata {
         no-space,
         /// The file is larger than the app may read at once (`limits`).
         too-large,
-        /// A file is in the way where a folder is needed.
+        /// A file is in the way where a folder is needed; for
+        /// `write-if-match`, the file changed since it was read.
         conflict,
         other(string),
     }
@@ -81,6 +82,11 @@ interface appdata {
     read-range: func(path: string, offset: u64, length: u64) -> result<list<u8>, error>;
     /// Creates or replaces the file, and the folders on the way.
     write: func(path: string, data: list<u8>) -> result<entry, error>;
+    /// Writes only if the file still has the `etag` it was read with; an
+    /// empty `if-match` writes only if there is no such file yet. Otherwise
+    /// `conflict`: someone wrote in between, e.g. the app's page and its job
+    /// at once (since 0.2.19).
+    write-if-match: func(path: string, data: list<u8>, if-match: string) -> result<entry, error>;
     /// Contents of a folder; `""` is the app's folder itself.
     %list: func(dir: string) -> result<list<entry>, error>;
     /// Deletes a file, or a folder with everything inside it.

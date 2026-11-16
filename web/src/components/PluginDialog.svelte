@@ -88,6 +88,8 @@
     if (uses.length) parts.push(`${t.pluginUses}: ${uses.map((tool) => `use.${tool}`).join(', ')}`);
     const frames = permissions?.frame ?? [];
     if (frames.length) parts.push(`${t.pluginFrames}: ${frames.join(', ')}`);
+    const connect = permissions?.connect ?? [];
+    if (connect.length) parts.push(`${t.pluginConnect}: ${connect.join(', ')}`);
     if (permissions?.images === 'any') parts.push(t.pluginImagesAny);
     for (const proxy of manifest?.proxy ?? []) parts.push(t.pluginProxy(proxy.paths, proxy.target));
     const asks = manifest?.limits;

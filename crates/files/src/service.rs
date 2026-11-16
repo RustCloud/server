@@ -1063,7 +1063,7 @@ fn file_too_large() -> Error {
     Error::new(ErrorKind::PayloadTooLarge, "FILE_TOO_LARGE", "The file is larger than the upload limit")
 }
 
-fn file_changed() -> Error {
+pub(crate) fn file_changed() -> Error {
     Error::conflict("FILE_CHANGED", "The file has changed since it was read")
 }
 

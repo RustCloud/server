@@ -88,6 +88,21 @@ impl NetworkRule {
         }
     }
 
+    /// The same server for WebSockets: `wss://…` (or `ws://…`), which a
+    /// browser doesn't count as the `https://` origin.
+    pub fn socket_origin(&self) -> String {
+        let origin = self.origin();
+        match origin.strip_prefix("https://") {
+            Some(rest) => format!("wss://{rest}"),
+            None => format!("ws://{}", origin.trim_start_matches("http://")),
+        }
+    }
+
+    /// Whether it names one server, not `*.example.com`.
+    pub fn is_one_server(&self) -> bool {
+        !self.subdomains
+    }
+
     /// Whether a request to `scheme://host:port` is allowed.
     pub fn allows(&self, scheme: &str, host: &str, port: u16) -> bool {
         let host = host.trim_end_matches('.').to_ascii_lowercase();

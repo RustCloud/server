@@ -385,6 +385,13 @@ pub struct Permissions {
     /// `{office_url}` (since 0.2.14).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frame: Vec<String>,
+    /// Servers the app's page may connect to from the user's browser
+    /// (`fetch`, WebSocket), e.g. LiveKit for calls (since 0.2.19): one
+    /// server each, `https://`, `wss://` (or `http://`, `ws://`), host and
+    /// port; usually `{livekit_url}`. Each allows the server's `https://`
+    /// and `wss://` origins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect: Vec<String>,
     /// Native tools of the server the app uses, see [`USES`]: `use = ["ffmpeg"]`.
     /// The administrator approves them, shown as `use.ffmpeg`.
     #[serde(default, rename = "use", skip_serializing_if = "Vec::is_empty")]
@@ -425,6 +432,7 @@ impl Permissions {
             && self.network.is_empty()
             && self.uses.is_empty()
             && self.frame.is_empty()
+            && self.connect.is_empty()
             && self.images.is_own()
     }
 
@@ -444,6 +452,42 @@ impl Permissions {
     /// `{key}` read from the server settings with `setting`.
     pub fn frame_origins(&self, setting: impl Fn(&str) -> Option<String>) -> Vec<String> {
         resolve(&self.frame, setting).iter().map(NetworkRule::origin).collect()
+    }
+
+    /// The origins of [`Permissions::connect`] for a page's CSP
+    /// (`https://lk.example.com wss://lk.example.com`), `{key}` read from
+    /// the server settings with `setting`; an empty or invalid setting gives none.
+    pub fn connect_origins(&self, setting: impl Fn(&str) -> Option<String>) -> Vec<String> {
+        self.connect
+            .iter()
+            .filter_map(|entry| match setting_key(entry) {
+                Some(key) => NetworkRule::from_url(&socket_as_http(setting(key)?.trim())).ok(),
+                None => connect_rule(entry).ok(),
+            })
+            .filter(NetworkRule::is_one_server)
+            .flat_map(|rule| [rule.origin(), rule.socket_origin()])
+            .collect()
+    }
+}
+
+/// `wss://host` as `https://host` and `ws://host` as `http://host`: the same
+/// server, read as a [`NetworkRule`].
+fn socket_as_http(address: &str) -> String {
+    if let Some(rest) = address.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = address.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        address.to_owned()
+    }
+}
+
+/// An entry of [`Permissions::connect`] that names its server.
+fn connect_rule(entry: &str) -> Result<NetworkRule, String> {
+    let rule = NetworkRule::parse(&socket_as_http(entry))?;
+    match rule.is_one_server() {
+        true => Ok(rule),
+        false => Err("one server, without *.".to_owned()),
     }
 }
 
@@ -566,8 +610,20 @@ impl Manifest {
                 })?;
             }
         }
-        if self.permissions.frame.len() > 10 {
-            return Err(ManifestError(format!("app \"{}\" asks for more than 10 frame addresses", self.id)));
+        for entry in &self.permissions.connect {
+            let checked = match setting_key(entry) {
+                Some(key) if text_settings.contains(&key) => Ok(()),
+                Some(key) => Err(format!("{{{key}}} must name a text server setting")),
+                None => connect_rule(entry).map(|_| ()),
+            };
+            checked.map_err(|reason| {
+                ManifestError(format!("app \"{}\": permissions.connect \"{entry}\": {reason}", self.id))
+            })?;
+        }
+        for (field, entries) in [("frame", &self.permissions.frame), ("connect", &self.permissions.connect)] {
+            if entries.len() > 10 {
+                return Err(ManifestError(format!("app \"{}\" asks for more than 10 {field} addresses", self.id)));
+            }
         }
         let mut uses = std::collections::BTreeSet::new();
         for tool in &self.permissions.uses {
@@ -975,6 +1031,42 @@ mod tests {
         assert!(Manifest::from_toml(&unknown).unwrap_err().0.contains("must name a text server setting"));
         let path = text.replace("frame = [\"{office_url}\"]", "frame = [\"https://x.example/path\"]");
         assert!(Manifest::from_toml(&path).unwrap_err().0.contains("permissions.frame"));
+    }
+
+    #[test]
+    fn pages_connect_to_one_server_each() {
+        let text =
+            format!("{NOTES}\n[[server_settings]]\nkey = \"livekit_url\"\nkind = \"text\"\nlabel.en = \"LiveKit\"\n")
+                .replace(
+                    "files_write = true",
+                    "files_write = true\nconnect = [\"{livekit_url}\", \"wss://sfu.example.com:7880\"]",
+                );
+        let manifest = Manifest::from_toml(&text).unwrap();
+        assert!(!manifest.permissions.is_none());
+        let livekit = |value: &'static str| move |key: &str| (key == "livekit_url").then(|| value.to_owned());
+        assert_eq!(
+            manifest.permissions.connect_origins(livekit(" wss://lk.example.com/ ")),
+            [
+                "https://lk.example.com",
+                "wss://lk.example.com",
+                "https://sfu.example.com:7880",
+                "wss://sfu.example.com:7880"
+            ]
+        );
+        assert_eq!(manifest.permissions.connect_origins(|_| None).len(), 2, "not filled in yet: the fixed one");
+        for wrong in ["wss://*.example.com", "lk example.com", "wss://lk.example.com x", "javascript:alert(1)"] {
+            assert_eq!(manifest.permissions.connect_origins(livekit(wrong)).len(), 2, "{wrong}");
+        }
+
+        for (entry, reason) in [
+            ("\"*.example.com\"", "one server"),
+            ("\"wss://x.example/path\"", "without a path"),
+            ("\"ftp://x.example\"", "only http"),
+            ("\"{nope}\"", "must name a text server setting"),
+        ] {
+            let err = Manifest::from_toml(&text.replace("\"{livekit_url}\"", entry)).expect_err(entry);
+            assert!(err.0.contains("permissions.connect") && err.0.contains(reason), "{err}");
+        }
     }
 
     #[test]

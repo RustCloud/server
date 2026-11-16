@@ -48,7 +48,7 @@ use rustcloud_auth::AdminUser;
 use rustcloud_core::{audit, Error, Field, Live, Result, Settings};
 use rustcloud_db::{plugin_config, DatabaseConnection};
 use rustcloud_plugin_api::limits::{self, SCALES};
-use rustcloud_plugin_api::{Download, Manifest, Scale, SettingKind};
+use rustcloud_plugin_api::{Download, Manifest, Permissions, Scale, SettingKind};
 use rustcloud_wasm_host::{read_app_dir, AppConfig, AppStorage, Limits, StoredFile, WasmHost};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{EntityTrait, Set};
@@ -441,12 +441,26 @@ impl Plugins {
     /// Origins of the services the panel may show for a running plugin's
     /// page (`permissions.frame`), with addresses from its settings.
     pub fn frame_origins(&self, id: &str) -> Vec<String> {
+        self.origins(id, |permissions, setting| permissions.frame_origins(setting))
+    }
+
+    /// Origins a running plugin's page may connect to (`permissions.connect`),
+    /// with addresses from its settings.
+    pub fn connect_origins(&self, id: &str) -> Vec<String> {
+        self.origins(id, |permissions, setting| permissions.connect_origins(setting))
+    }
+
+    fn origins(
+        &self,
+        id: &str,
+        of: impl Fn(&Permissions, &dyn Fn(&str) -> Option<String>) -> Vec<String>,
+    ) -> Vec<String> {
         let state = self.read();
         let Some(plugin) = state.plugins.iter().find(|p| p.id == id && p.status == Status::Running) else {
             return Vec::new();
         };
         let setting = |key: &str| plugin.values.get(key)?.as_str().map(str::to_owned);
-        plugin.manifest.as_ref().map(|m| m.permissions.frame_origins(setting)).unwrap_or_default()
+        plugin.manifest.as_ref().map(|m| of(&m.permissions, &setting)).unwrap_or_default()
     }
 
     /// The services running plugins show through the server's address

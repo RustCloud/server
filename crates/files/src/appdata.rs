@@ -15,7 +15,7 @@ use rustcloud_core::{validate, ByteRange, ByteStream, Error, ErrorKind, Result};
 use rustcloud_db::node;
 use uuid::Uuid;
 
-use crate::service::{Download, Files, Node, Writer};
+use crate::service::{file_changed, Download, Files, Node, Writer};
 use crate::versions::Versioning;
 
 /// Name of the hidden folder that holds every app's data.
@@ -149,6 +149,30 @@ impl Files {
         let body: ByteStream = Box::pin(stream::once(async move { Ok(Bytes::from(data)) }));
         let writer = Writer { versioning: Versioning::Off, ..Writer::app(app_id) };
         Ok(self.put_file(user, &parent, name, body, true, writer).await?.0)
+    }
+
+    /// Writes a file of the app's AppData only if no one changed it since it
+    /// was read: it still has the ETag `if_match`, or, for `""`, there is no
+    /// such file yet. Otherwise `FILE_CHANGED` (or `NAME_TAKEN` for `""`), so
+    /// the app's page and its job writing at once don't lose a change.
+    pub async fn appdata_write_if_match(
+        &self,
+        user: &User,
+        app_id: &str,
+        path: &str,
+        data: Vec<u8>,
+        if_match: &str,
+    ) -> Result<Node> {
+        let (parent, name) = self.appdata_parent(user, app_id, path, true).await?;
+        let body: ByteStream = Box::pin(stream::once(async move { Ok(Bytes::from(data)) }));
+        if if_match.is_empty() {
+            let writer = Writer { versioning: Versioning::Off, ..Writer::app(app_id) };
+            return Ok(self.put_file(user, &parent, name, body, false, writer).await?.0);
+        }
+        // Not through `put_file`: a file deleted since would be created anew.
+        let file = self.child_by_name(parent.id, name).await?.filter(|n| !n.is_dir).ok_or_else(file_changed)?;
+        let writer = Writer { versioning: Versioning::Off, if_match: Some(if_match), ..Writer::app(app_id) };
+        self.write_content(user, file, body, writer).await
     }
 
     /// Contents of a folder in the app's AppData; `""` is the AppData folder

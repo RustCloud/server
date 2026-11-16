@@ -102,6 +102,11 @@ pub trait UserServices: Send + Sync {
     async fn appdata_read_range(&self, path: &str, offset: u64, length: u64) -> Result<Vec<u8>>;
     /// Creates or replaces a file of the app's AppData.
     async fn appdata_write(&self, path: &str, data: Vec<u8>) -> Result<AppDataEntry>;
+    /// Writes a file of the app's AppData only if it still has the ETag
+    /// `if_match`, or, for `""`, only if there is no such file yet.
+    async fn appdata_write_if_match(&self, _path: &str, _data: Vec<u8>, _if_match: &str) -> Result<AppDataEntry> {
+        Err(unavailable())
+    }
     /// Lists a folder of the app's AppData (`""`: the app's folder).
     async fn appdata_list(&self, dir: &str) -> Result<Vec<AppDataEntry>>;
     /// Deletes a file or folder of the app's AppData.
@@ -731,7 +736,7 @@ fn appdata_error(err: Error) -> AppDataError {
         "INVALID_NAME" => AppDataError::InvalidPath,
         "QUOTA_EXCEEDED" | "FILE_TOO_LARGE" => AppDataError::NoSpace,
         "TOO_LARGE_TO_READ" => AppDataError::TooLarge,
-        "NAME_TAKEN" | "ALREADY_EXISTS" => AppDataError::Conflict,
+        "NAME_TAKEN" | "ALREADY_EXISTS" | "FILE_CHANGED" => AppDataError::Conflict,
         _ => AppDataError::Other(err.message),
     }
 }
@@ -754,6 +759,15 @@ impl bindings::rustcloud::app::appdata::Host for Instance {
 
     async fn write(&mut self, path: String, data: Vec<u8>) -> std::result::Result<AppDataEntry, AppDataError> {
         self.host(self.user_services()?.appdata_write(&path, data)).await.map_err(appdata_error)
+    }
+
+    async fn write_if_match(
+        &mut self,
+        path: String,
+        data: Vec<u8>,
+        if_match: String,
+    ) -> std::result::Result<AppDataEntry, AppDataError> {
+        self.host(self.user_services()?.appdata_write_if_match(&path, data, &if_match)).await.map_err(appdata_error)
     }
 
     async fn list(&mut self, dir: String) -> std::result::Result<Vec<AppDataEntry>, AppDataError> {

@@ -180,6 +180,7 @@ export interface AppManifest {
     network?: string[];
     /** Services the panel may show for its page, at their own addresses. */
     frame?: string[];
+    connect?: string[];
     /** Native tools of the server it uses: `ffmpeg`, `onnx`. */
     use?: string[];
     /** `any`: the app's page may show pictures from any site (since 0.2.18). */

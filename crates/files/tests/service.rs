@@ -724,6 +724,35 @@ async fn app_data_keeps_no_versions() {
     assert_eq!(blob_count(s.blob_dir.path()), 1);
 }
 
+#[tokio::test]
+async fn app_data_writes_only_what_no_one_changed_since() {
+    let s = setup().await;
+    let (files, alice) = (&s.files, &s.alice);
+    let write = |data: &str, if_match: &str| {
+        let (data, if_match) = (data.as_bytes().to_vec(), if_match.to_owned());
+        async move { files.appdata_write_if_match(alice, "talk", "rooms/a/day.jsonl", data, &if_match).await }
+    };
+    // "" creates, once.
+    let first = write("1", "").await.unwrap();
+    assert_eq!(write("x", "").await.unwrap_err().code, "NAME_TAKEN");
+
+    // The page and the job read the same; the first write wins, the second learns.
+    let etag = first.etag.clone().unwrap();
+    let second = write("1\n2", &etag).await.unwrap();
+    assert_eq!(write("1\n3", &etag).await.unwrap_err().code, "FILE_CHANGED");
+    let read = s.files.appdata_read(&s.alice, "talk", "rooms/a/day.jsonl", 100).await.unwrap();
+    assert_eq!(read, b"1\n2");
+
+    // A file deleted since isn't made again.
+    s.files.appdata_delete(&s.alice, "talk", "rooms/a/day.jsonl").await.unwrap();
+    let gone = write("1\n2\n3", second.etag.as_deref().unwrap()).await.unwrap_err();
+    assert_eq!(gone.code, "FILE_CHANGED");
+    assert_eq!(
+        s.files.appdata_read(&s.alice, "talk", "rooms/a/day.jsonl", 100).await.unwrap_err().code,
+        "FILE_NOT_FOUND"
+    );
+}
+
 fn permissions(files: FileScope, files_write: bool) -> Permissions {
     Permissions { files, files_write, ..Default::default() }
 }

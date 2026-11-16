@@ -40,10 +40,12 @@ use crate::AppState;
 /// to this server, as `permissions.network` promises the administrator for
 /// the app's code: anything else could carry the user's data away. The
 /// exceptions are what the manifest asks for: the services the panel shows
-/// for it (`frames`, from `permissions.frame`) and, with
+/// for it (`frames`, from `permissions.frame`), the servers it connects to
+/// (`connect`, from `permissions.connect`) and, with
 /// `permissions.images = "any"`, pictures from any site.
-fn page_policy(frames: &[String], images: Images) -> String {
+fn page_policy(frames: &[String], connect: &[String], images: Images) -> String {
     let frames: String = frames.iter().map(|origin| format!(" {origin}")).collect();
+    let connect: String = connect.iter().map(|origin| format!(" {origin}")).collect();
     let pictures = match images {
         Images::Own => "",
         Images::Any => " *",
@@ -51,7 +53,8 @@ fn page_policy(frames: &[String], images: Images) -> String {
     format!(
         "sandbox allow-scripts allow-forms allow-downloads; \
          default-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' data: blob:; \
-         img-src 'self' data: blob:{pictures}; frame-src 'self' data: blob:{frames}; \
+         img-src 'self' data: blob:{pictures}; connect-src 'self' data: blob:{connect}; \
+         frame-src 'self' data: blob:{frames}; \
          form-action 'self'{frames}; base-uri 'self'; frame-ancestors 'self'"
     )
 }
@@ -224,6 +227,7 @@ async fn forward(
     let user_id = caller.as_ref().and_then(|caller| Uuid::parse_str(&caller.user.id).ok());
     let images = state.plugins.get(id).map(|app| app.permissions.images).unwrap_or_default();
     let frames = state.plugins.frame_origins(id);
+    let connect = state.plugins.connect_origins(id);
     let response = state.plugins.host().handle(id, caller, request, &config).await?;
     if let Some((_, send)) = response.headers.iter().find(|(name, _)| name.eq_ignore_ascii_case(SEND_HEADER)) {
         let target = Target::from_header(send)?;
@@ -244,7 +248,7 @@ async fn forward(
         }
         return Ok(with_app_headers(sent, &response.headers));
     }
-    Ok(from_app_response(response, &frames, images))
+    Ok(from_app_response(response, &frames, &connect, images))
 }
 
 /// A file sent for an app, with the headers the app may set on it
@@ -394,8 +398,13 @@ fn to_app_request(method: &Method, uri: &Uri, headers: &HeaderMap, path: String,
 }
 
 /// An app's answer as the browser gets it: with the headers it may set, and
-/// the policy of its page (`frames`, `images`: see [`page_policy`]).
-fn from_app_response(response: rustcloud_wasm_host::Response, frames: &[String], images: Images) -> HttpResponse {
+/// the policy of its page (`frames`, `connect`, `images`: see [`page_policy`]).
+fn from_app_response(
+    response: rustcloud_wasm_host::Response,
+    frames: &[String],
+    connect: &[String],
+    images: Images,
+) -> HttpResponse {
     let mut http = HttpResponse::new(Body::from(response.body));
     *http.status_mut() = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let headers = http.headers_mut();
@@ -412,7 +421,7 @@ fn from_app_response(response: rustcloud_wasm_host::Response, frames: &[String],
     }
     // Origins in the policy are checked hosts and ports; without them, the
     // strictest policy there is.
-    let policy = HeaderValue::try_from(page_policy(frames, images))
+    let policy = HeaderValue::try_from(page_policy(frames, connect, images))
         .unwrap_or(HeaderValue::from_static("sandbox; default-src 'none'"));
     headers.insert(header::CONTENT_SECURITY_POLICY, policy);
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
@@ -502,6 +511,11 @@ impl UserServices for ServicesFor {
     async fn appdata_write(&self, path: &str, data: Vec<u8>) -> Result<AppDataEntry> {
         self.check_write()?;
         self.files.appdata_write(&self.user, &self.app_id, path, data).await.map(appdata_entry)
+    }
+
+    async fn appdata_write_if_match(&self, path: &str, data: Vec<u8>, if_match: &str) -> Result<AppDataEntry> {
+        self.check_write()?;
+        self.files.appdata_write_if_match(&self.user, &self.app_id, path, data, if_match).await.map(appdata_entry)
     }
 
     async fn appdata_list(&self, dir: &str) -> Result<Vec<AppDataEntry>> {
@@ -852,6 +866,22 @@ mod tests {
         ] {
             assert!(!redirect_allowed(away, &frames), "{away:?}");
         }
+    }
+
+    #[test]
+    fn pages_reach_only_this_server_and_what_the_manifest_names() {
+        let own = page_policy(&[], &[], Images::Own);
+        assert!(own.contains("default-src 'self' "), "{own}");
+        assert!(own.contains("connect-src 'self' data: blob:;"), "{own}");
+        assert!(own.contains("img-src 'self' data: blob:;"), "{own}");
+
+        let frames = ["https://office.example".to_owned()];
+        let connect = ["https://lk.example".to_owned(), "wss://lk.example".to_owned()];
+        let policy = page_policy(&frames, &connect, Images::Any);
+        assert!(policy.contains("connect-src 'self' data: blob: https://lk.example wss://lk.example;"), "{policy}");
+        assert!(policy.contains("frame-src 'self' data: blob: https://office.example;"), "{policy}");
+        assert!(policy.contains("img-src 'self' data: blob: *;"), "{policy}");
+        assert!(policy.starts_with("sandbox allow-scripts allow-forms allow-downloads;"), "{policy}");
     }
 
     #[test]
