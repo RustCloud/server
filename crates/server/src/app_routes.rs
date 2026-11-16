@@ -775,6 +775,20 @@ impl UserServices for ServicesFor {
         self.jobs.progress(&self.app_id, self.user.id).await
     }
 
+    async fn jobs_add_for(&self, to: Vec<String>, job: NewJob) -> Result<()> {
+        self.check_write()?;
+        self.jobs.add_for(&self.app_id, &self.user, to, job).await
+    }
+
+    async fn jobs_block(&self, user_id: &str, blocked: bool) -> Result<()> {
+        let other = Uuid::parse_str(user_id).map_err(|_| Error::bad_request("INVALID_JOB", "not a user id"))?;
+        self.jobs.block(&self.app_id, self.user.id, other, blocked).await
+    }
+
+    async fn jobs_blocked(&self) -> Result<Vec<String>> {
+        Ok(self.jobs.blocked(&self.app_id, self.user.id).await?.iter().map(Uuid::to_string).collect())
+    }
+
     async fn files_open(&self, id: &str) -> Result<std::fs::File> {
         let (opened, file) = self.files.app_open(&self.user, &self.app_id, self.file_id(id)?).await?;
         self.read(&file);

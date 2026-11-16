@@ -13,8 +13,34 @@ impl Guest for Echo {
     /// Each job's key says how it goes: `fail`, `again`, `panic`, `spin`
     /// (forever); anything else is done, and remembered in AppData.
     fn run_batch(_user: User, jobs: Vec<Job>) -> Vec<Outcome> {
+        let origins = jobs::origins();
         jobs.into_iter()
-            .map(|job| match job.key.as_str() {
+            .zip(origins.into_iter().map(Some).chain(std::iter::repeat(None)))
+            .map(|(job, origin)| match job.key.as_str() {
+                // `mail` jobs come from others (`permissions.deliver`): kept as
+                // `mail/<sender>-<key>`, with what the job could reach.
+                _ if job.kind == "mail" => {
+                    let from = origin.map_or("?".to_owned(), |o| o.from.username);
+                    let reach = format!(
+                        "files: {}, storage: {}, http: {}",
+                        files::granted().is_ok(),
+                        storage::list("").is_ok(),
+                        !matches!(
+                            http::fetch(&http::Request {
+                                method: "GET".to_owned(),
+                                url: "https://example.com/".to_owned(),
+                                headers: Vec::new(),
+                                body: Vec::new(),
+                            }),
+                            Err(http::Error::NotAllowed)
+                        ),
+                    );
+                    let _ = appdata::write(
+                        &format!("mail/{from}-{}", job.key),
+                        format!("{} | {reach}", job.data).as_bytes(),
+                    );
+                    Outcome::Done
+                }
                 "fail" => Outcome::Failed("broken".to_owned()),
                 "again" => Outcome::Retry("busy".to_owned()),
                 "panic" => panic!("on purpose"),
@@ -102,7 +128,9 @@ impl Guest for Echo {
                     };
                 }
                 match files::read(file) {
-                    Ok(data) => text(200, format!("{} {} {}", scope.file == file, scope.write, String::from_utf8_lossy(&data))),
+                    Ok(data) => {
+                        text(200, format!("{} {} {}", scope.file == file, scope.write, String::from_utf8_lossy(&data)))
+                    }
                     Err(err) => text(500, format!("{err:?}")),
                 }
             }
@@ -207,10 +235,35 @@ impl Guest for Echo {
                 Ok(data) => Response { status: 200, headers: Vec::new(), body: data },
                 Err(err) => text(404, format!("{err:?}")),
             },
+            // `mail` jobs for the users of the query (`alice,bob`), the body as data.
+            "/send-to" => {
+                let to: Vec<String> = request.query.split(',').map(str::to_owned).collect();
+                let job = NewJob {
+                    kind: "mail".to_owned(),
+                    key: "m1".to_owned(),
+                    data: String::from_utf8_lossy(&request.body).into(),
+                };
+                match jobs::add_for(&to, &job) {
+                    Ok(()) => text(200, "sent"),
+                    Err(err) => text(400, format!("{err:?}")),
+                }
+            }
+            // A `mail` job someone sent: `?<sender>-<key>`.
+            "/mail" => match appdata::read(&format!("mail/{}", request.query)) {
+                Ok(data) => text(200, String::from_utf8_lossy(&data)),
+                Err(err) => text(404, format!("{err:?}")),
+            },
+            // Blocks the user of the query (an id), or lists who is blocked.
+            "/block" => match jobs::block(&request.query) {
+                Ok(()) => text(200, "blocked"),
+                Err(err) => text(400, format!("{err:?}")),
+            },
             "/progress" => match jobs::progress() {
                 Ok(kinds) => {
-                    let lines: Vec<String> =
-                        kinds.iter().map(|k| format!("{}: {} waiting, {} failed", k.kind, k.waiting, k.failed)).collect();
+                    let lines: Vec<String> = kinds
+                        .iter()
+                        .map(|k| format!("{}: {} waiting, {} failed", k.kind, k.waiting, k.failed))
+                        .collect();
                     text(200, lines.join("\n"))
                 }
                 Err(err) => text(500, format!("{err:?}")),

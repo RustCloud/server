@@ -343,6 +343,10 @@ const en = {
   pluginUses: 'Uses',
   pluginFrames: 'Shows services',
   pluginConnect: 'Its page connects to',
+  pluginDeliver: (kinds: string[]) => `Users send each other jobs: ${kinds.join(', ')} (they run with AppData only)`,
+  pluginReach: 'Whom users may send to',
+  pluginReachAll: 'Everyone on the server',
+  pluginReachGroups: 'People they share a group with',
   pluginImagesAny: 'Its page shows pictures from any site (they learn who looks)',
   pluginProxy: (paths: string[], target: string) =>
     `Shows the service ${target} at ${paths.join(', ')} of this server: it acts for users who open files in the plugin — approve only a service you trust`,
@@ -1027,6 +1031,10 @@ const ru: Texts = {
   pluginUses: 'Возможности',
   pluginFrames: 'Показывает сервисы',
   pluginConnect: 'Страница соединяется с',
+  pluginDeliver: (kinds: string[]) => `Пользователи отправляют друг другу задачи: ${kinds.join(', ')} (выполняются только с AppData)`,
+  pluginReach: 'Кому пользователи могут отправлять',
+  pluginReachAll: 'Всем на сервере',
+  pluginReachGroups: 'Тем, с кем есть общая группа',
   pluginImagesAny: 'Страница показывает картинки с любых сайтов (они узнают, кто смотрит)',
   pluginProxy: (paths: string[], target: string) =>
     `Показывает сервис ${target} по путям ${paths.join(', ')} этого сервера: он действует от имени пользователей, открывших в плагине файлы, — утверждайте, только если доверяете ему`,

@@ -506,6 +506,29 @@ pub mod plugin_config {
         /// Values of the plugin's server settings, a JSON object.
         pub settings: String,
         pub updated_at: DateTimeUtc,
+        /// Whom its users may add jobs for (`jobs.add-for`): `all` users, or
+        /// `groups`: only those they share a group with.
+        pub reach: String,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A user a user blocked in a plugin: no `jobs.add-for` from them.
+pub mod plugin_block {
+    use sea_orm::entity::prelude::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "plugin_blocks")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub app_id: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub user_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub blocked_id: Uuid,
+        pub created_at: DateTimeUtc,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -568,6 +591,10 @@ pub mod plugin_job {
         pub run_after: DateTimeUtc,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
+        /// Who added it with `jobs.add-for`, if not the user; their key is
+        /// stored as `<from_user_id>/<key>`, so senders don't replace each
+        /// other's jobs.
+        pub from_user_id: Option<Uuid>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}

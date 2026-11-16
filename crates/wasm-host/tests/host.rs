@@ -408,15 +408,18 @@ async fn apps_run_batches_of_jobs_for_a_user() {
     assert!(host.runs_jobs("echo"));
     let data = Arc::new(MemoryData::default());
     let caller = caller("alice", &data).unwrap();
-    let outcomes =
-        host.run_batch("echo", caller.clone(), jobs(&["a", "fail", "again"]), &AppConfig::default()).await.unwrap();
+    let outcomes = host
+        .run_batch("echo", caller.clone(), jobs(&["a", "fail", "again"]), Vec::new(), &AppConfig::default())
+        .await
+        .unwrap();
     assert!(
         matches!(&outcomes[..], [JobOutcome::Done, JobOutcome::Failed(why), JobOutcome::Retry(_)] if why == "broken"),
         "{outcomes:?}"
     );
     assert_eq!(data.0.lock().unwrap().get("done/scan-a").map(Vec::as_slice), Some(&b"d"[..]), "as the user");
 
-    let err = host.run_batch("echo", caller, jobs(&["a", "panic"]), &AppConfig::default()).await.unwrap_err();
+    let err =
+        host.run_batch("echo", caller, jobs(&["a", "panic"]), Vec::new(), &AppConfig::default()).await.unwrap_err();
     assert_eq!(err.code, "APP_FAILED");
 }
 
@@ -435,7 +438,8 @@ async fn long_jobs_give_way_to_other_work() {
     let data = Arc::new(MemoryData::default());
     let short =
         AppConfig { limits: Limits { time: Duration::from_secs(1), ..Limits::default() }, ..Default::default() };
-    let err = host.run_batch("echo", caller("alice", &data).unwrap(), jobs(&["spin"]), &short).await.unwrap_err();
+    let err =
+        host.run_batch("echo", caller("alice", &data).unwrap(), jobs(&["spin"]), Vec::new(), &short).await.unwrap_err();
     assert_eq!(err.code, "APP_FAILED", "stopped by its time limit");
     assert!(counter.load(std::sync::atomic::Ordering::Relaxed) > 5, "other work went on meanwhile");
 }

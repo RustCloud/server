@@ -90,12 +90,26 @@
     if (frames.length) parts.push(`${t.pluginFrames}: ${frames.join(', ')}`);
     const connect = permissions?.connect ?? [];
     if (connect.length) parts.push(`${t.pluginConnect}: ${connect.join(', ')}`);
+    const deliver = permissions?.deliver ?? [];
+    if (deliver.length) parts.push(t.pluginDeliver(deliver));
     if (permissions?.images === 'any') parts.push(t.pluginImagesAny);
     for (const proxy of manifest?.proxy ?? []) parts.push(t.pluginProxy(proxy.paths, proxy.target));
     const asks = manifest?.limits;
     if (asks && (asks.memory > 1 || asks.time > 1 || asks.workers > 1)) parts.push(t.pluginAsks(asks));
     return parts;
   });
+
+  async function saveReach(reach: 'all' | 'groups') {
+    try {
+      const saved = await api.configurePlugin(plugin.id, { enabled: plugin.enabled, limits: plugin.limits, reach });
+      onchanged(saved);
+      systemError = '';
+      systemMessage = t.pluginSettingsSaved;
+    } catch (e) {
+      systemError = errorText(e);
+      systemMessage = '';
+    }
+  }
 
   async function saveLimits(limits: Scale | null) {
     try {
@@ -172,6 +186,15 @@
       <ul class="rights small">
         {#each rights as right (right)}<li>{right}</li>{/each}
       </ul>
+      {#if plugin.manifest?.permissions?.deliver?.length}
+        <label class="small reach">
+          {t.pluginReach}
+          <select value={plugin.reach} onchange={(e) => saveReach(e.currentTarget.value as 'all' | 'groups')}>
+            <option value="groups">{t.pluginReachGroups}</option>
+            <option value="all">{t.pluginReachAll}</option>
+          </select>
+        </label>
+      {/if}
 
       <h3>{t.pluginAdvanced}</h3>
       <p class="muted small">{t.pluginResources(plugin.effective, plugin.limits !== null)}</p>
@@ -306,6 +329,12 @@
   .limits {
     display: grid;
     gap: 8px;
+  }
+  .reach {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
   }
   .limits label {
     display: flex;

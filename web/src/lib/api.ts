@@ -181,6 +181,8 @@ export interface AppManifest {
     /** Services the panel may show for its page, at their own addresses. */
     frame?: string[];
     connect?: string[];
+    /** Kinds of jobs other users of the app may add for a user (since 0.2.19). */
+    deliver?: string[];
     /** Native tools of the server it uses: `ffmpeg`, `onnx`. */
     use?: string[];
     /** `any`: the app's page may show pictures from any site (since 0.2.18). */
@@ -278,6 +280,8 @@ export interface Plugin {
   enabled: boolean;
   /** The multiples the administrator chose; null: as the manifest says. */
   limits: Scale | null;
+  /** Whom its users may add jobs for (`permissions.deliver`): everyone, or people they share a group with. */
+  reach: 'all' | 'groups';
   /** What it gets, and what follows from that for one request. */
   effective: {
     scale: Scale;
@@ -382,6 +386,8 @@ export interface PluginUpdate {
   enabled: boolean;
   /** null: as the manifest says. */
   limits: Scale | null;
+  /** Missing: as it was. */
+  reach?: 'all' | 'groups';
 }
 
 export interface AppsList {

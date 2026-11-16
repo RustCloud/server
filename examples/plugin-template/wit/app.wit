@@ -473,6 +473,8 @@ interface storage {
 /// `app-with-jobs`). Kinds and batch sizes are declared in the manifest
 /// (`[[jobs]]`).
 interface jobs {
+    use types.{user};
+
     record new-job {
         /// One of the manifest's `[[jobs]]`.
         kind: string,
@@ -521,6 +523,50 @@ interface jobs {
     add: func(jobs: list<new-job>) -> result<_, error>;
     /// The user's jobs of this app, by kind.
     progress: func() -> result<list<kind-progress>, error>;
+
+    /// Who added a job of the batch being run, and when (since 0.2.19).
+    record origin {
+        /// The user of the batch, or, for a kind of `permissions.deliver`,
+        /// the user who added it with `add-for`. Set by the server.
+        %from: user,
+        /// RFC 3339, UTC; set by the server. A retried job keeps it, so jobs
+        /// may run out of this order: sort by it where order matters.
+        created-at: string,
+    }
+
+    /// One per job of the batch `run-batch` got, in the same order; empty
+    /// outside a batch (since 0.2.19).
+    origins: func() -> list<origin>;
+
+    variant send-error {
+        /// The request has no logged-in user.
+        no-user,
+        /// The kind isn't in `permissions.deliver`, more than 50 users, an
+        /// empty or too long key, or data over 64 KiB.
+        invalid(string),
+        /// The sender adds too many too fast, or too much waits for a user.
+        too-many,
+        other(string),
+    }
+
+    /// Adds a job of a kind of `permissions.deliver` for each user of `to`
+    /// (ids or usernames; the sender may be one of them), to run as that
+    /// user (since 0.2.19). The server sets who added it (`origins`).
+    /// Unknown users, users who blocked the sender and users the
+    /// administrator doesn't let the sender reach get nothing, with the same
+    /// answer: `add-for` doesn't tell which users exist. A job with the
+    /// kind and key of one the same sender added before and that still
+    /// waits replaces it. Jobs of these kinds run with AppData and `jobs`
+    /// only: no files, links, shares, storage, `http` or `use-*`, since
+    /// someone else chose what they work on.
+    add-for: func(to: list<string>, job: new-job) -> result<_, send-error>;
+
+    /// Stops `add-for` jobs and rings from this user (an id) to the user of
+    /// the request, in this app; `unblock` lets them through again (since 0.2.19).
+    block: func(user-id: string) -> result<_, error>;
+    unblock: func(user-id: string) -> result<_, error>;
+    /// Ids of the users the user of the request blocked in this app.
+    blocked: func() -> result<list<string>, error>;
 }
 
 /// ffmpeg, run by the server for the app (since 0.2.7; manifest

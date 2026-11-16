@@ -1676,6 +1676,90 @@ async fn plugins_run_background_jobs_in_batches_for_their_users() {
 }
 
 #[tokio::test]
+async fn users_add_jobs_for_each_other_only_as_far_as_allowed() {
+    let manifest = format!(
+        "{}deliver = [\"mail\"]\nnetwork = [\"example.com\"]\n[[jobs]]\nkind = \"mail\"\n",
+        echo_manifest_toml()
+    );
+    let app = TestApp::with_wasm_apps(|apps| {
+        std::fs::create_dir_all(apps.join("echo")).unwrap();
+        std::fs::write(apps.join("echo/manifest.toml"), &manifest).unwrap();
+        std::fs::write(apps.join("echo/app.wasm"), echo_wasm()).unwrap();
+    })
+    .await;
+    let admin = app.register("admin").await;
+    let alice = app.register("alice").await;
+    let bob = app.register("bob").await;
+    let carol = app.register("carol").await;
+    let id_of = |reply: Reply| reply.json()["id"].as_str().unwrap().to_owned();
+    let alice_id = id_of(app.get("/api/v1/auth/me", As::Browser(&alice)).await);
+    let bob_id = id_of(app.get("/api/v1/auth/me", As::Browser(&bob)).await);
+    let send = |to: &str, text: &'static str| {
+        let (app, alice, uri) = (&app, alice.clone(), format!("/app/echo/send-to?{to}"));
+        async move { app.send(Method::POST, &uri, As::Browser(&alice), Body::from(text), &[]).await.text() }
+    };
+    let progress = |who: String| {
+        let app = &app;
+        async move { app.get("/app/echo/progress", As::Browser(&who)).await.text() }
+    };
+    let mail = |who: String, from: &'static str| {
+        let app = &app;
+        async move {
+            let uri = format!("/app/echo/mail?{from}-m1");
+            for _ in 0..WAIT_ROUNDS {
+                let reply = app.get(&uri, As::Browser(&who)).await;
+                if reply.status == StatusCode::OK {
+                    return reply.text();
+                }
+                tokio::time::sleep(WAIT_ROUND).await;
+            }
+            "nothing came".to_owned()
+        }
+    };
+
+    // By default only people who share a group: alice and bob share none, so
+    // nothing reaches bob, and alice can't tell (nobody gets it, "nobody" too).
+    assert_eq!(send("bob,nobody", "hi").await, "sent");
+    assert_eq!(progress(bob.clone()).await, "", "nothing waits for bob");
+    // Herself she always reaches.
+    assert_eq!(send(&alice_id, "note").await, "sent");
+    assert_eq!(mail(alice.clone(), "alice").await, "note | files: false, storage: false, http: false");
+
+    // In one group, alice reaches bob, by name or id; carol stays out.
+    let group = app.json(Method::POST, "/api/v1/admin/groups", As::Browser(&admin), json!({ "name": "Team" })).await;
+    let group = id_of(group);
+    for member in [&alice_id, &bob_id] {
+        let uri = format!("/api/v1/admin/groups/{group}/members/{member}");
+        app.send(Method::PUT, &uri, As::Browser(&admin), Body::empty(), &[]).await;
+    }
+    assert_eq!(send("bob,carol", "hello").await, "sent");
+    // Bob's job runs as bob, knows alice sent it, and gets no files,
+    // storage or network: alice chose what it works on.
+    assert_eq!(mail(bob.clone(), "alice").await, "hello | files: false, storage: false, http: false");
+    assert_eq!(progress(carol.clone()).await, "");
+
+    // The administrator may let everyone reach everyone.
+    let everyone = json!({ "enabled": true, "reach": "all" });
+    let saved = app.json(Method::PUT, "/api/v1/admin/plugins/echo", As::Browser(&admin), everyone).await;
+    assert_eq!(saved.json()["reach"], "all");
+    assert_eq!(send("carol", "hey").await, "sent");
+    assert_eq!(mail(carol.clone(), "alice").await, "hey | files: false, storage: false, http: false");
+
+    // Bob blocks alice: nothing more from her, the same answer for her.
+    let block = format!("/app/echo/block?{alice_id}");
+    assert_eq!(app.send(Method::POST, &block, As::Browser(&bob), Body::empty(), &[]).await.text(), "blocked");
+    assert_eq!(send("bob", "again").await, "sent");
+    assert_eq!(progress(bob.clone()).await, "", "nothing waits for bob");
+
+    // Only kinds of permissions.deliver, at most 50 people, 64 KiB.
+    let many = vec!["x"; 51].join(",");
+    assert!(send(&many, "hi").await.contains("Invalid"));
+    let uri = "/app/echo/send-to?carol";
+    let big = app.send(Method::POST, uri, As::Browser(&alice), Body::from("x".repeat(65 << 10)), &[]).await;
+    assert!(big.text().contains("Invalid"), "too much data");
+}
+
+#[tokio::test]
 async fn file_events_start_jobs_in_the_folders_users_give_plugins() {
     let on = r#"["file.granted", "file.created", "file.changed", "file.deleted", "file.moved"]"#;
     let manifest = format!("{}[[jobs]]\nkind = \"scan\"\non = {on}\nmime = [\"text/*\"]\n", echo_manifest_toml());

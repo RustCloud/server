@@ -212,6 +212,8 @@ pub struct Plugin {
     pub enabled: bool,
     /// The multiples the administrator chose; `None`: as the manifest says.
     pub limits: Option<Scale>,
+    /// Whom its users may add jobs for (`permissions.deliver`).
+    pub reach: Reach,
     /// What it gets: [`Self::limits`] or the manifest's, within `[plugins]`.
     pub effective: Effective,
     /// Values of its server settings, secrets left out.
@@ -316,6 +318,38 @@ pub struct PluginUpdate {
     /// None: as the manifest says.
     #[serde(default)]
     pub limits: Option<Scale>,
+    /// None: as it was.
+    #[serde(default)]
+    pub reach: Option<Reach>,
+}
+
+/// Whom users of a plugin may add jobs for with `jobs.add-for` (a chat
+/// message, an invitation): everyone on the server, or only people they
+/// share a group with. In a company, people of other departments can't
+/// write to each other out of the blue.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Reach {
+    All,
+    #[default]
+    Groups,
+}
+
+impl Reach {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Reach::All => "all",
+            Reach::Groups => "groups",
+        }
+    }
+
+    fn parse(text: &str) -> Reach {
+        if text == "all" {
+            Reach::All
+        } else {
+            Reach::Groups
+        }
+    }
 }
 
 /// The plugins of the running server.
@@ -377,6 +411,7 @@ impl Plugins {
                 if let Some(row) = config(&plugin.id) {
                     plugin.enabled = row.enabled;
                     plugin.limits = row.limits.as_deref().and_then(|limits| serde_json::from_str(limits).ok());
+                    plugin.reach = Reach::parse(&row.reach);
                     plugin.set_values(serde_json::from_str(&row.settings).unwrap_or_default());
                 }
                 plugins.push(plugin);
@@ -435,13 +470,21 @@ impl Plugins {
         let network = approved.map(|m| m.permissions.network_rules_with(setting)).unwrap_or_default();
         let uses = approved.map(|m| m.permissions.uses.clone()).unwrap_or_default();
         drop(state);
-        AppConfig { limits: self.limits(id), settings, network, uses, self_url: None }
+        AppConfig { limits: self.limits(id), settings, network, uses, self_url: None, confined: false }
     }
 
     /// Origins of the services the panel may show for a running plugin's
     /// page (`permissions.frame`), with addresses from its settings.
     pub fn frame_origins(&self, id: &str) -> Vec<String> {
         self.origins(id, |permissions, setting| permissions.frame_origins(setting))
+    }
+
+    /// Whom users of a running plugin may add jobs for; `None`: it isn't
+    /// running, or its manifest names no kinds for that.
+    pub fn reach(&self, id: &str) -> Option<Reach> {
+        let state = self.read();
+        let plugin = state.plugins.iter().find(|p| p.id == id && p.status == Status::Running)?;
+        plugin.manifest.as_ref().filter(|m| !m.permissions.deliver.is_empty()).map(|_| plugin.reach)
     }
 
     /// Origins a running plugin's page may connect to (`permissions.connect`),
@@ -512,6 +555,8 @@ impl Plugins {
         let max_memory = self.defaults.read(|d| d.max_memory);
         let memory = limits::combine(plugin.memory, memory).min(max_memory);
         config.limits = Limits::scaled(memory, limits::combine(plugin.time, time));
+        // Other users may have chosen what these work on.
+        config.confined = self.get(id).is_some_and(|m| m.permissions.deliver.iter().any(|k| k == kind));
         (batch, config)
     }
 
@@ -546,6 +591,7 @@ impl Plugins {
             }
             plugin.enabled = update.enabled;
             plugin.limits = update.limits;
+            plugin.reach = update.reach.unwrap_or(plugin.reach);
             let registry = Registry::new(plugins);
             let plugin = registry.plugins.iter().find(|p| p.id == id).cloned().ok_or_else(plugin_not_found)?;
             if let (true, Status::Failed { error }) = (update.enabled, &plugin.status) {
@@ -560,6 +606,7 @@ impl Plugins {
             limits: Set(limits_json(update.limits)?),
             settings: Set("{}".to_owned()),
             updated_at: Set(Utc::now()),
+            reach: Set(plugin.reach.as_str().to_owned()),
         };
         plugin_config::Entity::insert(row)
             .on_conflict(
@@ -567,6 +614,7 @@ impl Plugins {
                     .update_columns([
                         plugin_config::Column::Enabled,
                         plugin_config::Column::Limits,
+                        plugin_config::Column::Reach,
                         plugin_config::Column::UpdatedAt,
                     ])
                     .to_owned(),
@@ -578,6 +626,7 @@ impl Plugins {
             "plugin.configure",
             app = id,
             enabled = update.enabled,
+            reach = plugin.reach.as_str(),
             limits = update.limits.map(|l| format!("memory ×{}, time ×{}, workers {}", l.memory, l.time, l.workers)),
             "plugin settings changed"
         );
@@ -616,6 +665,7 @@ impl Plugins {
             limits: Set(limits_json(plugin.limits)?),
             settings: Set(Value::Object(values.clone()).to_string()),
             updated_at: Set(Utc::now()),
+            reach: Set(plugin.reach.as_str().to_owned()),
         };
         plugin_config::Entity::insert(row)
             .on_conflict(
@@ -688,6 +738,7 @@ impl Plugins {
             limits: Set(None),
             settings: Set("{}".to_owned()),
             updated_at: Set(Utc::now()),
+            reach: Set(previous.as_ref().map_or(Reach::default(), |p| p.reach).as_str().to_owned()),
         };
         plugin_config::Entity::insert(row)
             .on_conflict(
@@ -702,6 +753,7 @@ impl Plugins {
         plugin.enabled = enabled;
         if let Some(previous) = &previous {
             plugin.limits = previous.limits;
+            plugin.reach = previous.reach;
             plugin.set_values(previous.values.clone());
         }
         let mut plugins = self.list();
@@ -939,6 +991,7 @@ fn new_plugin(id: String, source: Source, manifest: Option<Manifest>) -> Plugin 
         status: Status::Running,
         enabled: true,
         limits: None,
+        reach: Reach::default(),
         effective: Effective::default(),
         settings: Map::new(),
         secrets_set: Vec::new(),
@@ -1167,7 +1220,7 @@ mod tests {
         let plugins = load(&db.conn, dir.path()).await;
         assert_eq!(plugins.limits("echo"), Limits::default());
         let scale = Scale { memory: 2, time: 1, workers: 3 };
-        let update = PluginUpdate { enabled: false, limits: Some(scale) };
+        let update = PluginUpdate { enabled: false, limits: Some(scale), reach: None };
         plugins.configure("echo", update).await.unwrap();
         assert!(plugins.get("echo").is_none(), "disabled at once");
 
@@ -1177,10 +1230,10 @@ mod tests {
         assert_eq!(restarted.limits("echo"), Limits::scaled(2, 1));
         assert_eq!(restarted.workers("echo"), 3);
 
-        let too_much = PluginUpdate { enabled: false, limits: Some(Scale { memory: 32, ..scale }) };
+        let too_much = PluginUpdate { enabled: false, limits: Some(Scale { memory: 32, ..scale }), reach: None };
         let err = restarted.configure("echo", too_much).await.unwrap_err();
         assert!(err.message.contains("max_memory"), "{err:?}");
-        let odd = PluginUpdate { enabled: false, limits: Some(Scale { time: 3, ..scale }) };
+        let odd = PluginUpdate { enabled: false, limits: Some(Scale { time: 3, ..scale }), reach: None };
         assert_eq!(restarted.configure("echo", odd).await.unwrap_err().code, "INVALID_SETTINGS");
     }
 

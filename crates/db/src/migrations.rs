@@ -31,6 +31,7 @@ impl MigratorTrait for Migrator {
             Box::new(ShareOptions),
             Box::new(Groups),
             Box::new(EmailVerified),
+            Box::new(Delivery),
         ]
     }
 }
@@ -835,5 +836,45 @@ impl MigrationTrait for EmailVerified {
         // Nobody knows who typed the addresses there already: none counts.
         let column = boolean("email_verified").default(false).to_owned();
         manager.alter_table(Table::alter().table("users").add_column(column).to_owned()).await
+    }
+}
+
+/// Jobs users of a plugin add for each other (`jobs.add-for`): who added a
+/// job (`plugin_jobs.from_user_id`, none for the user's own), whom a user
+/// blocked in a plugin (`plugin_blocks`), and whom the administrator lets
+/// users reach in it (`plugin_configs.reach`: `all`, or `groups` — only
+/// people they share a group with).
+struct Delivery;
+
+impl MigrationName for Delivery {
+    fn name(&self) -> &str {
+        "m0022_delivery"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Delivery {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // No foreign key: SQLite can't add one to a table. A job of someone
+        // deleted since is dropped when its turn comes.
+        manager
+            .alter_table(Table::alter().table("plugin_jobs").add_column(uuid_null("from_user_id")).to_owned())
+            .await?;
+        let reach = string("reach").default("groups").to_owned();
+        manager.alter_table(Table::alter().table("plugin_configs").add_column(reach).to_owned()).await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table("plugin_blocks")
+                    .col(string("app_id"))
+                    .col(uuid("user_id"))
+                    .col(uuid("blocked_id"))
+                    .col(timestamp_with_time_zone("created_at"))
+                    .primary_key(Index::create().col("app_id").col("user_id").col("blocked_id"))
+                    .foreign_key(&mut cascade_fk("plugin_blocks", "user_id", "users"))
+                    .foreign_key(&mut cascade_fk("plugin_blocks", "blocked_id", "users"))
+                    .to_owned(),
+            )
+            .await
     }
 }

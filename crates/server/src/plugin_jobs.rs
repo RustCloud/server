@@ -30,10 +30,10 @@ use std::time::{Duration, Instant};
 use chrono::{TimeDelta, Utc};
 use rustcloud_auth::Auth;
 use rustcloud_core::{Error, Result};
-use rustcloud_db::{plugin_job, DatabaseConnection};
+use rustcloud_db::{group_member, plugin_block, plugin_job, user, DatabaseConnection};
 use rustcloud_files::{FileEvent, Files, Grant, GrantKind};
-use rustcloud_wasm_host::{Job, JobOutcome, JobProgress, NewJob};
-use sea_orm::sea_query::{Expr, OnConflict};
+use rustcloud_wasm_host::{Job, JobOrigin, JobOutcome, JobProgress, NewJob, User};
+use sea_orm::sea_query::{Expr, ExprTrait, OnConflict};
 use sea_orm::ActiveValue::{NotSet, Unchanged};
 use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 use serde::Serialize;
@@ -43,7 +43,7 @@ use uuid::Uuid;
 
 use crate::app_links::AppLinks;
 use crate::app_routes::caller_for;
-use crate::plugins::Plugins;
+use crate::plugins::{Plugins, Reach};
 
 /// Tries of a job before it counts as failed.
 const MAX_ATTEMPTS: i32 = 5;
@@ -58,6 +58,16 @@ const ADD_LIMIT: usize = 1000;
 const WAITING_LIMIT: u64 = 200_000;
 /// How often an idle worker looks for jobs whose retry time has come.
 const IDLE: Duration = Duration::from_secs(10);
+
+/// `add-for`: users at once, data of a job, and what may wait for one user
+/// from others in one plugin — jobs and bytes of data.
+const RECIPIENTS: usize = 50;
+const DELIVERED_DATA_LIMIT: usize = 64 << 10;
+const WAITING_FROM_OTHERS: u64 = 10_000;
+const WAITING_BYTES_FROM_OTHERS: i64 = 16 << 20;
+/// Jobs one sender may add for others in one plugin per minute: a chat
+/// message to 50 people every 3 seconds.
+const SENT_PER_MINUTE: u32 = 1000;
 
 const WAITING: &str = "waiting";
 const RUNNING: &str = "running";
@@ -112,6 +122,8 @@ pub struct Jobs {
     turn: tokio::sync::Mutex<Turn>,
     /// Batches running now, by plugin: each runs at most its `workers`.
     running: std::sync::Mutex<HashMap<String, usize>>,
+    /// Jobs each sender added for others this minute, by plugin and sender.
+    sent: std::sync::Mutex<HashMap<(String, Uuid), (Instant, u32)>>,
 }
 
 /// A batch chosen to run: jobs of one plugin, user and kind.
@@ -130,8 +142,8 @@ impl Jobs {
         plugins: Arc<Plugins>,
         links: Arc<AppLinks>,
     ) -> Self {
-        let (wake, turn, running) = (Notify::new(), Default::default(), Default::default());
-        Self { db, files, auth, plugins, links, wake, turn, running }
+        let (wake, turn, running, sent) = (Notify::new(), Default::default(), Default::default(), Default::default());
+        Self { db, files, auth, plugins, links, wake, turn, running, sent }
     }
 
     /// Starts `workers` workers and the watcher of file events. Jobs that
@@ -199,6 +211,7 @@ impl Jobs {
             run_after: Set(now),
             created_at: Set(now),
             updated_at: Set(now),
+            from_user_id: Set(None),
         });
         use plugin_job::Column as C;
         plugin_job::Entity::insert_many(rows)
@@ -211,6 +224,205 @@ impl Jobs {
             .await?;
         self.wake.notify_waiters();
         Ok(())
+    }
+
+    /// Adds a job of a kind of `permissions.deliver` for each of `to` (user
+    /// ids or usernames): someone else's, as `sender`. Users who don't
+    /// exist, blocked the sender, are out of the plugin's reach or have too
+    /// much waiting get nothing, with the same answer, so `add-for` doesn't
+    /// tell who exists. Only the sender's own pace is refused (`TOO_MANY_JOBS`).
+    pub async fn add_for(
+        &self,
+        app_id: &str,
+        sender: &rustcloud_auth::User,
+        to: Vec<String>,
+        job: NewJob,
+    ) -> Result<()> {
+        let manifest = self.plugins.get(app_id).ok_or_else(|| Error::not_found("APP_NOT_FOUND", "No such app"))?;
+        let reach = self.plugins.reach(app_id);
+        if !manifest.permissions.deliver.contains(&job.kind) || reach.is_none() {
+            return Err(invalid_job(format!("\"{}\" is not a kind of permissions.deliver", job.kind)));
+        }
+        if to.len() > RECIPIENTS {
+            return Err(invalid_job(format!("more than {RECIPIENTS} users at once")));
+        }
+        if job.key.is_empty() || job.key.len() > KEY_LIMIT || job.data.len() > DELIVERED_DATA_LIMIT {
+            return Err(invalid_job(format!(
+                "a key is 1–{KEY_LIMIT} bytes and data at most {} KiB",
+                DELIVERED_DATA_LIMIT >> 10
+            )));
+        }
+        let recipients = self.recipients(app_id, sender.id, &to, reach.unwrap_or_default()).await?;
+        if !self.count_sent(app_id, sender.id, recipients.iter().filter(|id| **id != sender.id).count() as u32) {
+            return Err(Error::conflict("TOO_MANY_JOBS", format!("more than {SENT_PER_MINUTE} a minute")));
+        }
+        let now = Utc::now();
+        let mut rows = Vec::new();
+        for recipient in recipients {
+            let own = recipient == sender.id;
+            if !own && !self.has_room(app_id, recipient, job.data.len()).await? {
+                tracing::warn!(app = app_id, "plugin jobs: too much waits for a user from others; a job is dropped");
+                continue;
+            }
+            rows.push(plugin_job::ActiveModel {
+                id: Set(Uuid::now_v7()),
+                app_id: Set(app_id.to_owned()),
+                user_id: Set(recipient),
+                kind: Set(job.kind.clone()),
+                key: Set(if own { job.key.clone() } else { format!("{}/{}", sender.id, job.key) }),
+                data: Set(job.data.clone()),
+                state: Set(WAITING.to_owned()),
+                attempts: Set(0),
+                alone: Set(false),
+                error: Set(None),
+                run_after: Set(now),
+                created_at: Set(now),
+                updated_at: Set(now),
+                from_user_id: Set((!own).then_some(sender.id)),
+            });
+        }
+        if rows.is_empty() {
+            return Ok(());
+        }
+        use plugin_job::Column as C;
+        plugin_job::Entity::insert_many(rows)
+            .on_conflict(
+                OnConflict::columns([C::AppId, C::UserId, C::Kind, C::Key])
+                    .update_columns([
+                        C::Data,
+                        C::State,
+                        C::Attempts,
+                        C::Alone,
+                        C::Error,
+                        C::RunAfter,
+                        C::CreatedAt,
+                        C::UpdatedAt,
+                    ])
+                    .to_owned(),
+            )
+            .exec(&self.db)
+            .await?;
+        self.wake.notify_waiters();
+        Ok(())
+    }
+
+    /// The users of `to` the sender may add jobs for: existing, within
+    /// `reach`, not blocking the sender; each once.
+    async fn recipients(&self, app_id: &str, sender: Uuid, to: &[String], reach: Reach) -> Result<Vec<Uuid>> {
+        let (ids, names): (Vec<_>, Vec<_>) =
+            to.iter().map(|name| name.trim()).partition(|n| Uuid::parse_str(n).is_ok());
+        let ids: Vec<Uuid> = ids.iter().filter_map(|id| Uuid::parse_str(id).ok()).collect();
+        let names: Vec<String> = names.iter().map(|name| name.to_lowercase()).collect();
+        let mut found: Vec<Uuid> = user::Entity::find()
+            .select_only()
+            .column(user::Column::Id)
+            .filter(user::Column::Id.is_in(ids).or(user::Column::Username.is_in(names)))
+            .into_tuple()
+            .all(&self.db)
+            .await?;
+        found.sort();
+        found.dedup();
+        if reach == Reach::Groups {
+            let groups: Vec<Uuid> = group_member::Entity::find()
+                .select_only()
+                .column(group_member::Column::GroupId)
+                .filter(group_member::Column::UserId.eq(sender))
+                .into_tuple()
+                .all(&self.db)
+                .await?;
+            let mates: Vec<Uuid> = group_member::Entity::find()
+                .select_only()
+                .column(group_member::Column::UserId)
+                .filter(group_member::Column::GroupId.is_in(groups))
+                .filter(group_member::Column::UserId.is_in(found.clone()))
+                .into_tuple()
+                .all(&self.db)
+                .await?;
+            found.retain(|id| *id == sender || mates.contains(id));
+        }
+        let blocking: Vec<Uuid> = plugin_block::Entity::find()
+            .select_only()
+            .column(plugin_block::Column::UserId)
+            .filter(plugin_block::Column::AppId.eq(app_id))
+            .filter(plugin_block::Column::BlockedId.eq(sender))
+            .filter(plugin_block::Column::UserId.is_in(found.clone()))
+            .into_tuple()
+            .all(&self.db)
+            .await?;
+        found.retain(|id| !blocking.contains(id));
+        Ok(found)
+    }
+
+    /// Counts `jobs` a sender adds for others; false if that is more than
+    /// they may this minute.
+    fn count_sent(&self, app_id: &str, sender: Uuid, jobs: u32) -> bool {
+        let mut sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        sent.retain(|_, (since, _)| now.duration_since(*since) < Duration::from_secs(60));
+        let (_, count) = sent.entry((app_id.to_owned(), sender)).or_insert((now, 0));
+        if *count + jobs > SENT_PER_MINUTE {
+            return false;
+        }
+        *count += jobs;
+        true
+    }
+
+    /// Whether a job of `bytes` from others still fits what waits for a user.
+    async fn has_room(&self, app_id: &str, user_id: Uuid, bytes: usize) -> Result<bool> {
+        let (count, size): (i64, Option<i64>) = plugin_job::Entity::find()
+            .select_only()
+            .column_as(plugin_job::Column::Id.count(), "count")
+            .column_as(Expr::cust("SUM(LENGTH(data))"), "size")
+            .filter(plugin_job::Column::AppId.eq(app_id))
+            .filter(plugin_job::Column::UserId.eq(user_id))
+            .filter(plugin_job::Column::FromUserId.is_not_null())
+            .into_tuple()
+            .one(&self.db)
+            .await?
+            .unwrap_or_default();
+        Ok((count as u64) < WAITING_FROM_OTHERS && size.unwrap_or(0) + bytes as i64 <= WAITING_BYTES_FROM_OTHERS)
+    }
+
+    /// Blocks (or unblocks) a user's `add-for` jobs for `user` in a plugin.
+    pub async fn block(&self, app_id: &str, user: Uuid, other: Uuid, blocked: bool) -> Result<()> {
+        if !blocked {
+            plugin_block::Entity::delete_by_id((app_id.to_owned(), user, other)).exec(&self.db).await?;
+            return Ok(());
+        }
+        if user::Entity::find_by_id(other).one(&self.db).await?.is_none() {
+            return Ok(());
+        }
+        let row = plugin_block::ActiveModel {
+            app_id: Set(app_id.to_owned()),
+            user_id: Set(user),
+            blocked_id: Set(other),
+            created_at: Set(Utc::now()),
+        };
+        use plugin_block::Column as C;
+        plugin_block::Entity::insert(row)
+            .on_conflict(OnConflict::columns([C::AppId, C::UserId, C::BlockedId]).do_nothing().to_owned())
+            .exec_without_returning(&self.db)
+            .await?;
+        // What they added and still waits goes too.
+        plugin_job::Entity::delete_many()
+            .filter(plugin_job::Column::AppId.eq(app_id))
+            .filter(plugin_job::Column::UserId.eq(user))
+            .filter(plugin_job::Column::FromUserId.eq(other))
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    /// The users `user` blocked in a plugin.
+    pub async fn blocked(&self, app_id: &str, user: Uuid) -> Result<Vec<Uuid>> {
+        Ok(plugin_block::Entity::find()
+            .select_only()
+            .column(plugin_block::Column::BlockedId)
+            .filter(plugin_block::Column::AppId.eq(app_id))
+            .filter(plugin_block::Column::UserId.eq(user))
+            .into_tuple()
+            .all(&self.db)
+            .await?)
     }
 
     /// Adds the jobs the files of a new folder grant start (`file.granted`),
@@ -321,11 +533,14 @@ impl Jobs {
         Ok(kinds.into_values().collect())
     }
 
-    /// Deletes a user's jobs of a plugin (the user took back all access).
+    /// Deletes a user's jobs of a plugin (the user took back all access to
+    /// files); jobs of `permissions.deliver`, which get no files, stay.
     pub async fn forget_user(&self, app_id: &str, user_id: Uuid) -> Result<()> {
+        let deliver = self.plugins.get(app_id).map(|m| m.permissions.deliver).unwrap_or_default();
         plugin_job::Entity::delete_many()
             .filter(plugin_job::Column::AppId.eq(app_id))
             .filter(plugin_job::Column::UserId.eq(user_id))
+            .filter(plugin_job::Column::Kind.is_not_in(deliver))
             .exec(&self.db)
             .await?;
         Ok(())
@@ -423,7 +638,6 @@ impl Jobs {
     async fn run(self: &Arc<Self>, batch: Batch) {
         let started = Instant::now();
         let Batch { app_id, user_id, kind, rows } = batch;
-        let size = rows.len();
         let user = match self.auth.find_user(user_id).await {
             Ok(user) if !user.disabled => user,
             // A blocked user's jobs wait for the account to be unblocked.
@@ -435,6 +649,11 @@ impl Jobs {
             }
         };
         let username = user.username.clone();
+        let (rows, origins) = self.origins(&user, rows).await;
+        if rows.is_empty() {
+            return;
+        }
+        let size = rows.len();
         // No session: a batch makes no links for a page.
         let caller = caller_for(&self.files, self, &self.links, user, None, &app_id, false);
         let (_, config) = self.plugins.job_config(&app_id, &kind);
@@ -442,14 +661,18 @@ impl Jobs {
             .iter()
             .map(|row| Job {
                 kind: row.kind.clone(),
-                key: row.key.clone(),
+                // Without the sender's id the server put before the key.
+                key: match row.from_user_id {
+                    Some(from) => row.key.strip_prefix(&format!("{from}/")).unwrap_or(&row.key).to_owned(),
+                    None => row.key.clone(),
+                },
                 data: row.data.clone(),
                 attempts: row.attempts as u32,
             })
             .collect();
 
         let (mut done, mut failed, mut again) = (Vec::new(), 0, 0);
-        match self.plugins.host().run_batch(&app_id, caller, jobs, &config).await {
+        match self.plugins.host().run_batch(&app_id, caller, jobs, origins, &config).await {
             Ok(outcomes) => {
                 let mut outcomes = outcomes.into_iter();
                 for row in rows {
@@ -508,6 +731,50 @@ impl Jobs {
              {again} later; {left} left"
         );
         self.wake.notify_waiters();
+    }
+
+    /// Who added each job of a batch for `user`, and when. Jobs of senders
+    /// deleted since are dropped: what they sent goes with them.
+    async fn origins(
+        &self,
+        user: &rustcloud_auth::User,
+        rows: Vec<plugin_job::Model>,
+    ) -> (Vec<plugin_job::Model>, Vec<JobOrigin>) {
+        let as_wit = |u: &rustcloud_auth::User| User {
+            id: u.id.to_string(),
+            username: u.username.clone(),
+            display_name: u.display_name.clone(),
+        };
+        let mut senders: HashMap<Uuid, Option<User>> = HashMap::new();
+        let (mut kept, mut origins, mut gone) = (Vec::new(), Vec::new(), Vec::new());
+        for row in rows {
+            let from = match row.from_user_id {
+                None => Some(as_wit(user)),
+                Some(id) => match senders.get(&id) {
+                    Some(sender) => sender.clone(),
+                    None => {
+                        let sender = self.auth.find_user(id).await.ok().map(|u| as_wit(&u));
+                        senders.insert(id, sender.clone());
+                        sender
+                    }
+                },
+            };
+            match from {
+                Some(from) => {
+                    origins.push(JobOrigin { from, created_at: row.created_at.to_rfc3339() });
+                    kept.push(row);
+                }
+                None => gone.push(row.id),
+            }
+        }
+        if !gone.is_empty() {
+            if let Err(err) =
+                plugin_job::Entity::delete_many().filter(plugin_job::Column::Id.is_in(gone)).exec(&self.db).await
+            {
+                tracing::warn!("plugin jobs: {err}");
+            }
+        }
+        (kept, origins)
     }
 
     /// Puts a job back to be tried again, or fails it after the last try.

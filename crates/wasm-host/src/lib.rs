@@ -42,7 +42,9 @@ mod bindings {
 
 pub use bindings::rustcloud::app::appdata::Entry as AppDataEntry;
 pub use bindings::rustcloud::app::files::{FileLock, Node as FileNode, Version as FileVersion};
-pub use bindings::rustcloud::app::jobs::{Job, KindProgress as JobProgress, NewJob, Outcome as JobOutcome};
+pub use bindings::rustcloud::app::jobs::{
+    Job, KindProgress as JobProgress, NewJob, Origin as JobOrigin, Outcome as JobOutcome,
+};
 pub use bindings::rustcloud::app::links::{Error as LinkError, StreamMode, Target as LinkTarget};
 pub use bindings::rustcloud::app::shares::Share;
 pub use bindings::rustcloud::app::storage::File as StoredFile;
@@ -77,7 +79,7 @@ pub use bindings::rustcloud::app::types::{Request, Response, User};
 use bindings::rustcloud::app::appdata::Error as AppDataError;
 use bindings::rustcloud::app::files::{Error as FilesError, LockError};
 use bindings::rustcloud::app::http::{Error as HttpError, Request as HttpRequest, Response as HttpResponse};
-use bindings::rustcloud::app::jobs::Error as JobsError;
+use bindings::rustcloud::app::jobs::{Error as JobsError, SendError};
 use bindings::rustcloud::app::shares::Error as SharesError;
 use bindings::rustcloud::app::storage::Error as StorageError;
 use bindings::rustcloud::app::tokens::Error as TokenError;
@@ -171,6 +173,18 @@ pub trait UserServices: Send + Sync {
     async fn jobs_add(&self, jobs: Vec<NewJob>) -> Result<()>;
     /// The user's jobs of the app, by kind.
     async fn jobs_progress(&self) -> Result<Vec<JobProgress>>;
+    /// Adds a job of a kind of `permissions.deliver` for each of `to`.
+    async fn jobs_add_for(&self, _to: Vec<String>, _job: NewJob) -> Result<()> {
+        Err(unavailable())
+    }
+    /// Blocks or unblocks `add-for` from a user to the user, in the app.
+    async fn jobs_block(&self, _user_id: &str, _blocked: bool) -> Result<()> {
+        Err(unavailable())
+    }
+    /// Ids of the users the user blocked in the app.
+    async fn jobs_blocked(&self) -> Result<Vec<String>> {
+        Err(unavailable())
+    }
 
     /// Links for the app's page to files, one per target (see the `links`
     /// import); `NO_SESSION` without a browser session.
@@ -291,6 +305,9 @@ pub struct AppConfig {
     /// How the service of the app's `[[proxy]]` reaches this server (the
     /// `proxy` import).
     pub self_url: Option<String>,
+    /// A job someone else may have chosen (`permissions.deliver`): only
+    /// AppData, jobs, settings and the log, see [`Confined`].
+    pub confined: bool,
 }
 
 impl Default for AppConfig {
@@ -301,6 +318,7 @@ impl Default for AppConfig {
             network: Vec::new(),
             uses: Vec::new(),
             self_url: None,
+            confined: false,
         }
     }
 }
@@ -486,10 +504,12 @@ impl WasmHost {
         app_id: &str,
         caller: Caller,
         jobs: Vec<Job>,
+        origins: Vec<JobOrigin>,
         config: &AppConfig,
     ) -> Result<Vec<JobOutcome>> {
         let user = caller.user.clone();
         let (pre, mut store) = self.prepare(app_id, Some(caller), config, true)?;
+        store.data_mut().origins = origins;
         let clock = (store.data().started, store.data().tools.clone());
         let run = async {
             let instance = pre.instance_pre().instantiate_async(&mut store).await?;
@@ -511,9 +531,13 @@ impl WasmHost {
     ) -> Result<(bindings::AppPre<Instance>, Store<Instance>)> {
         let pre = self.apps.read().unwrap_or_else(|e| e.into_inner()).get(app_id).cloned();
         let pre = pre.ok_or_else(|| Error::not_found("APP_NOT_FOUND", "No such app"))?;
-        let mut instance = Instance::new(app_id, caller.map(|c| c.services), config, self.http.clone());
+        let services = caller.map(|c| match config.confined {
+            true => Arc::new(Confined(c.services)) as Arc<dyn UserServices>,
+            false => c.services,
+        });
+        let mut instance = Instance::new(app_id, services, config, self.http.clone());
         instance.background = background;
-        instance.storage = self.storage.clone();
+        instance.storage = self.storage.clone().filter(|_| !config.confined);
         instance.ffmpeg = self.ffmpeg.clone();
         instance.onnx = self.onnx.clone();
         let mut store = Store::new(&self.engine, instance);
@@ -603,6 +627,9 @@ struct Instance {
     onnx: Option<Arc<dyn UseOnnx>>,
     /// The native tools it may use.
     uses: Arc<[String]>,
+    /// Who added the jobs of the batch being run, and when.
+    origins: Vec<JobOrigin>,
+    confined: bool,
     wasi: WasiCtx,
     table: ResourceTable,
     store_limits: StoreLimits,
@@ -620,13 +647,15 @@ impl Instance {
             tools: Arc::default(),
             services,
             settings: config.settings.clone(),
-            self_url: config.self_url.clone(),
-            network: config.network.as_slice().into(),
+            self_url: config.self_url.clone().filter(|_| !config.confined),
+            network: if config.confined { Arc::from([]) } else { config.network.as_slice().into() },
             http,
             storage: None,
             ffmpeg: None,
             onnx: None,
-            uses: config.uses.as_slice().into(),
+            uses: if config.confined { Arc::from([]) } else { config.uses.as_slice().into() },
+            origins: Vec::new(),
+            confined: config.confined,
             // Nothing from the host: no files, network, environment or arguments.
             wasi: WasiCtx::builder().build(),
             table: ResourceTable::new(),
@@ -782,6 +811,115 @@ impl bindings::rustcloud::app::appdata::Host for Instance {
 /// What services that don't offer something answer.
 fn unavailable() -> Error {
     Error::internal("not available here")
+}
+
+/// What a job of a kind of `permissions.deliver` gets: someone else chose
+/// what it works on (a message from another user), so it gets the user's
+/// AppData and jobs, never their files, shares or links — a mistake in the
+/// app reading the message can't hand the user's files to its sender.
+/// Storage, `http`, `use-*` and `proxy` are cut in [`Instance::new`].
+pub struct Confined(pub Arc<dyn UserServices>);
+
+fn confined() -> Error {
+    Error::forbidden("Jobs other users may add get only AppData and jobs").with_code("CONFINED")
+}
+
+#[async_trait::async_trait]
+impl UserServices for Confined {
+    async fn appdata_read(&self, path: &str, limit: u64) -> Result<Vec<u8>> {
+        self.0.appdata_read(path, limit).await
+    }
+    async fn appdata_read_range(&self, path: &str, offset: u64, length: u64) -> Result<Vec<u8>> {
+        self.0.appdata_read_range(path, offset, length).await
+    }
+    async fn appdata_write(&self, path: &str, data: Vec<u8>) -> Result<AppDataEntry> {
+        self.0.appdata_write(path, data).await
+    }
+    async fn appdata_write_if_match(&self, path: &str, data: Vec<u8>, if_match: &str) -> Result<AppDataEntry> {
+        self.0.appdata_write_if_match(path, data, if_match).await
+    }
+    async fn appdata_list(&self, dir: &str) -> Result<Vec<AppDataEntry>> {
+        self.0.appdata_list(dir).await
+    }
+    async fn appdata_delete(&self, path: &str) -> Result<()> {
+        self.0.appdata_delete(path).await
+    }
+    async fn jobs_add(&self, jobs: Vec<NewJob>) -> Result<()> {
+        self.0.jobs_add(jobs).await
+    }
+    async fn jobs_progress(&self) -> Result<Vec<JobProgress>> {
+        self.0.jobs_progress().await
+    }
+    async fn jobs_add_for(&self, to: Vec<String>, job: NewJob) -> Result<()> {
+        self.0.jobs_add_for(to, job).await
+    }
+    async fn jobs_block(&self, user_id: &str, blocked: bool) -> Result<()> {
+        self.0.jobs_block(user_id, blocked).await
+    }
+    async fn jobs_blocked(&self) -> Result<Vec<String>> {
+        self.0.jobs_blocked().await
+    }
+
+    async fn files_granted(&self) -> Result<Vec<FileNode>> {
+        Err(confined())
+    }
+    async fn files_get(&self, _id: &str) -> Result<FileNode> {
+        Err(confined())
+    }
+    async fn files_children(&self, _folder_id: &str) -> Result<Vec<FileNode>> {
+        Err(confined())
+    }
+    async fn files_read(&self, _id: &str, _limit: u64) -> Result<Vec<u8>> {
+        Err(confined())
+    }
+    async fn files_read_range(&self, _id: &str, _offset: u64, _length: u64) -> Result<Vec<u8>> {
+        Err(confined())
+    }
+    async fn files_write(&self, _id: &str, _data: Vec<u8>) -> Result<FileNode> {
+        Err(confined())
+    }
+    async fn files_create_file(&self, _folder_id: &str, _name: &str, _data: Vec<u8>) -> Result<FileNode> {
+        Err(confined())
+    }
+    async fn files_create_folder(&self, _parent_id: &str, _name: &str) -> Result<FileNode> {
+        Err(confined())
+    }
+    async fn files_delete(&self, _id: &str) -> Result<()> {
+        Err(confined())
+    }
+    async fn shares_received(&self) -> Result<Vec<Share>> {
+        Err(confined())
+    }
+    async fn shared_read(&self, _share_id: &str, _path: &str, _limit: u64) -> Result<Vec<u8>> {
+        Err(confined())
+    }
+    async fn shared_write(&self, _share_id: &str, _path: &str, _data: Vec<u8>) -> Result<AppDataEntry> {
+        Err(confined())
+    }
+    async fn shared_list(&self, _share_id: &str, _dir: &str) -> Result<Vec<AppDataEntry>> {
+        Err(confined())
+    }
+    async fn shared_delete(&self, _share_id: &str, _path: &str) -> Result<()> {
+        Err(confined())
+    }
+    async fn shares_leave(&self, _share_id: &str) -> Result<()> {
+        Err(confined())
+    }
+    async fn links_create(&self, targets: Vec<LinkTarget>) -> Vec<Result<String>> {
+        targets.iter().map(|_| Err(confined())).collect()
+    }
+    async fn links_video_stream(&self, _target: LinkTarget, _mode: StreamMode) -> Result<String> {
+        Err(confined())
+    }
+    async fn links_upload(&self, _folder: &str, _name: &str, _overwrite: bool) -> Result<String> {
+        Err(confined())
+    }
+    async fn files_open(&self, _id: &str) -> Result<std::fs::File> {
+        Err(confined())
+    }
+    async fn appdata_open(&self, _path: &str) -> Result<std::fs::File> {
+        Err(confined())
+    }
 }
 
 /// The WIT error for a server error.
@@ -976,6 +1114,9 @@ fn storage_error(err: Error) -> StorageError {
 
 impl Instance {
     fn app_storage(&self) -> std::result::Result<Arc<dyn AppStorage>, StorageError> {
+        if self.confined {
+            return Err(StorageError::Other("jobs other users may add get no storage".to_owned()));
+        }
         self.storage.clone().ok_or_else(|| StorageError::Other("this server has no storage for apps".to_owned()))
     }
 }
@@ -1026,6 +1167,34 @@ impl bindings::rustcloud::app::jobs::Host for Instance {
     async fn progress(&mut self) -> std::result::Result<Vec<JobProgress>, JobsError> {
         let services = self.services.clone().ok_or(JobsError::NoUser)?;
         self.host(services.jobs_progress()).await.map_err(jobs_error)
+    }
+
+    async fn origins(&mut self) -> Vec<JobOrigin> {
+        self.origins.clone()
+    }
+
+    async fn add_for(&mut self, to: Vec<String>, job: NewJob) -> std::result::Result<(), SendError> {
+        let services = self.services.clone().ok_or(SendError::NoUser)?;
+        self.host(services.jobs_add_for(to, job)).await.map_err(|err| match err.code {
+            "INVALID_JOB" | "UNKNOWN_JOB_KIND" => SendError::Invalid(err.message),
+            "TOO_MANY_JOBS" => SendError::TooMany,
+            _ => SendError::Other(err.message),
+        })
+    }
+
+    async fn block(&mut self, user_id: String) -> std::result::Result<(), JobsError> {
+        let services = self.services.clone().ok_or(JobsError::NoUser)?;
+        self.host(services.jobs_block(&user_id, true)).await.map_err(jobs_error)
+    }
+
+    async fn unblock(&mut self, user_id: String) -> std::result::Result<(), JobsError> {
+        let services = self.services.clone().ok_or(JobsError::NoUser)?;
+        self.host(services.jobs_block(&user_id, false)).await.map_err(jobs_error)
+    }
+
+    async fn blocked(&mut self) -> std::result::Result<Vec<String>, JobsError> {
+        let services = self.services.clone().ok_or(JobsError::NoUser)?;
+        self.host(services.jobs_blocked()).await.map_err(jobs_error)
     }
 }
 

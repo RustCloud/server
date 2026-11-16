@@ -392,6 +392,13 @@ pub struct Permissions {
     /// and `wss://` origins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connect: Vec<String>,
+    /// Kinds of `[[jobs]]` other users of the app may add for a user
+    /// (`jobs.add-for`, since 0.2.19): how a chat delivers a message. Jobs
+    /// of these kinds run with the user's AppData and jobs only, never their
+    /// files, links, storage, network or tools: someone else chose what they
+    /// work on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deliver: Vec<String>,
     /// Native tools of the server the app uses, see [`USES`]: `use = ["ffmpeg"]`.
     /// The administrator approves them, shown as `use.ffmpeg`.
     #[serde(default, rename = "use", skip_serializing_if = "Vec::is_empty")]
@@ -433,6 +440,7 @@ impl Permissions {
             && self.uses.is_empty()
             && self.frame.is_empty()
             && self.connect.is_empty()
+            && self.deliver.is_empty()
             && self.images.is_own()
     }
 
@@ -672,11 +680,21 @@ impl Manifest {
                 Some("can start on file events only with folder access (permissions.files)")
             } else if !valid_mime(&job.mime) {
                 Some("mime must be types like image/jpeg or image/*")
+            } else if !job.on.is_empty() && self.permissions.deliver.contains(&job.kind) {
+                Some("is in permissions.deliver and can't start on file events: it gets no files")
             } else {
                 None
             };
             if let Some(problem) = problem {
                 return Err(ManifestError(format!("app \"{}\": job \"{}\" {problem}", self.id, job.kind)));
+            }
+        }
+        for kind in &self.permissions.deliver {
+            if !self.jobs.iter().any(|job| &job.kind == kind) {
+                return Err(ManifestError(format!(
+                    "app \"{}\": permissions.deliver \"{kind}\" names no [[jobs]] kind",
+                    self.id
+                )));
             }
         }
         for (i, open) in self.open_with.iter().enumerate() {
@@ -1031,6 +1049,20 @@ mod tests {
         assert!(Manifest::from_toml(&unknown).unwrap_err().0.contains("must name a text server setting"));
         let path = text.replace("frame = [\"{office_url}\"]", "frame = [\"https://x.example/path\"]");
         assert!(Manifest::from_toml(&path).unwrap_err().0.contains("permissions.frame"));
+    }
+
+    #[test]
+    fn other_users_add_only_jobs_the_manifest_names() {
+        let text = format!("{NOTES}\n[[jobs]]\nkind = \"deliver\"\n")
+            .replace("files_write = true", "files_write = true\ndeliver = [\"deliver\"]");
+        let manifest = Manifest::from_toml(&text).unwrap();
+        assert_eq!(manifest.permissions.deliver, ["deliver"]);
+        assert!(!manifest.permissions.is_none());
+
+        let unknown = text.replace("deliver = [\"deliver\"]", "deliver = [\"mail\"]");
+        assert!(Manifest::from_toml(&unknown).unwrap_err().0.contains("names no [[jobs]] kind"));
+        let on_files = text.replace("kind = \"deliver\"", "kind = \"deliver\"\non = [\"file.created\"]");
+        assert!(Manifest::from_toml(&on_files).unwrap_err().0.contains("can't start on file events"), "{on_files}");
     }
 
     #[test]
