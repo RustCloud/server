@@ -2358,6 +2358,43 @@ async fn plugins_get_the_server_settings_the_admin_fills_in() {
 }
 
 #[tokio::test]
+async fn plugins_get_the_defaults_of_settings_left_empty() {
+    let manifest = format!(
+        "{}[[server_settings]]\nkey = \"model\"\nkind = \"text\"\nlabel.en = \"Model\"\ndefault = \"small\"\n\
+         [[server_settings]]\nkey = \"timeout\"\nkind = \"number\"\nlabel.en = \"Timeout\"\ndefault = 30\n\
+         [[server_settings]]\nkey = \"verbose\"\nkind = \"bool\"\nlabel.en = \"Verbose\"\ndefault = true\n\
+         [[server_settings]]\nkey = \"api_key\"\nkind = \"secret\"\nlabel.en = \"API key\"\n",
+        echo_manifest_toml()
+    );
+    let app = TestApp::with_wasm_apps(|apps| {
+        std::fs::create_dir_all(apps.join("echo")).unwrap();
+        std::fs::write(apps.join("echo/manifest.toml"), &manifest).unwrap();
+        std::fs::write(apps.join("echo/app.wasm"), echo_wasm()).unwrap();
+    })
+    .await;
+    let admin = app.register("admin").await;
+    let save = |body: Value| {
+        let (app, admin) = (&app, &admin);
+        async move { app.json(Method::PUT, "/api/v1/admin/plugins/echo/settings", As::Browser(admin), body).await }
+    };
+    let settings = || async { app.get("/app/echo/settings", As::Anonymous).await.json() };
+
+    // Never saved: the defaults.
+    assert_eq!(settings().await, json!({ "model": "small", "timeout": 30, "verbose": true }));
+
+    // What the administrator saves wins; the browser sees only that, the defaults are in the manifest.
+    let saved = save(json!({ "model": "large", "timeout": 5, "verbose": false })).await.json();
+    assert_eq!(saved["settings"], json!({ "model": "large", "timeout": 5, "verbose": false }));
+    assert_eq!(saved["manifest"]["server_settings"][0]["default"], "small");
+    assert_eq!(settings().await, json!({ "model": "large", "timeout": 5, "verbose": false }));
+
+    // Emptied again: the defaults again.
+    let saved = save(json!({ "model": null, "verbose": false })).await.json();
+    assert_eq!(saved["settings"], json!({ "verbose": false }));
+    assert_eq!(settings().await, json!({ "model": "small", "timeout": 30, "verbose": false }));
+}
+
+#[tokio::test]
 async fn web_ui_and_unknown_api_paths() {
     let app = TestApp::new().await;
 

@@ -17,8 +17,8 @@ mod network;
 pub use limits::{Limits, Scale};
 pub use manifest::{
     proxy_path_matches, setting_key, valid_proxy_path, valid_storage_path, Download, FileScope, Images, JobKind,
-    Layout, Manifest, ManifestError, NewFile, OpenWith, Permissions, Proxy, ServerSetting, SettingKind, Ui,
-    FILE_EVENTS, RESERVED_PATHS,
+    Layout, Manifest, ManifestError, NewFile, OpenWith, Permissions, Proxy, ServerSetting, SettingKind, SettingValue,
+    Ui, FILE_EVENTS, RESERVED_PATHS, SETTING_LIST_LIMIT, SETTING_TEXT_LIMIT,
 };
 pub use network::{url_allowed, NetworkRule};
 pub use semver::{Version, VersionReq};
@@ -26,7 +26,7 @@ pub use semver::{Version, VersionReq};
 /// Version of this API. Minor versions only add things; a major version may
 /// break apps, which then declare it in [`Manifest::api`]. Before 1.0 a minor
 /// version may break too (the semver rule for `0.x`).
-pub const API_VERSION: &str = "0.2.19";
+pub const API_VERSION: &str = "0.2.20";
 
 /// [`API_VERSION`] parsed.
 pub fn api_version() -> Version {

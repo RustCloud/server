@@ -275,6 +275,8 @@ export interface ServerSetting {
   label: Record<string, string>;
   hint?: Record<string, string>;
   unit?: string;
+  /** What the plugin gets while the setting is empty (since 0.2.20); never for secrets. */
+  default?: boolean | number | string | string[];
 }
 
 /** A plugin as the administration lists it (`/api/v1/admin/plugins`). */

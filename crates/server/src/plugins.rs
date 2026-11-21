@@ -48,7 +48,7 @@ use rustcloud_auth::AdminUser;
 use rustcloud_core::{audit, Error, Field, Live, Result, Settings};
 use rustcloud_db::{plugin_config, DatabaseConnection};
 use rustcloud_plugin_api::limits::{self, SCALES};
-use rustcloud_plugin_api::{Download, Manifest, Permissions, Scale, SettingKind};
+use rustcloud_plugin_api::{Download, Manifest, Permissions, Scale, SettingKind, SettingValue};
 use rustcloud_wasm_host::{read_app_dir, AppConfig, AppStorage, Limits, StoredFile, WasmHost};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{EntityTrait, Set};
@@ -68,9 +68,6 @@ pub const DEFAULT_CATALOG: &str = "https://raw.githubusercontent.com/RustCloud/_
 pub const ARCHIVE_LIMIT: usize = 64 * 1024 * 1024;
 /// Largest `manifest.toml` in an archive.
 const MANIFEST_LIMIT: u64 = 64 * 1024;
-/// Longest text setting, and most lines of a list setting.
-const TEXT_LIMIT: usize = 10_000;
-const LIST_LIMIT: usize = 1_000;
 
 /// `[plugins]`: what all plugins together may use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,9 +217,14 @@ pub struct Plugin {
     pub settings: Map<String, Value>,
     /// Keys of the secrets that are filled in.
     pub secrets_set: Vec<String>,
-    /// All values, secrets too: only for the plugin itself.
+    /// What the plugin gets: the saved values, secrets too, and the
+    /// manifest's defaults of the settings left empty. Only for the plugin
+    /// itself.
     #[serde(skip)]
     values: Map<String, Value>,
+    /// The values the administrator saved, secrets too.
+    #[serde(skip)]
+    saved: Map<String, Value>,
     /// Its jobs left and failed, by kind.
     pub queue: BTreeMap<String, Counts>,
     /// What it keeps in its storage.
@@ -299,14 +301,22 @@ impl From<StoredFile> for StorageFile {
 }
 
 impl Plugin {
-    /// Sets the values of its server settings and what the browser may see of them.
-    fn set_values(&mut self, values: Map<String, Value>) {
-        let secret = |key: &str| {
-            self.manifest.iter().flat_map(|m| &m.server_settings).any(|s| s.key == key && s.kind == SettingKind::Secret)
-        };
-        self.settings = values.iter().filter(|(key, _)| !secret(key)).map(|(k, v)| (k.clone(), v.clone())).collect();
-        self.secrets_set = values.keys().filter(|key| secret(key)).cloned().collect();
-        self.values = values;
+    /// Sets the saved values of its server settings, what the browser may
+    /// see of them (the defaults are in the manifest), and what the plugin
+    /// gets.
+    fn set_values(&mut self, saved: Map<String, Value>) {
+        let declared = self.manifest.iter().flat_map(|m| &m.server_settings);
+        let secret = |key: &str| declared.clone().any(|s| s.key == key && s.kind == SettingKind::Secret);
+        self.settings = saved.iter().filter(|(key, _)| !secret(key)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        self.secrets_set = saved.keys().filter(|key| secret(key)).cloned().collect();
+        self.values = saved.clone();
+        for setting in declared.clone() {
+            if let (false, Some(default)) = (saved.contains_key(&setting.key), &setting.default) {
+                let default = serde_json::to_value(default).unwrap_or(Value::Null);
+                self.values.insert(setting.key.clone(), default);
+            }
+        }
+        self.saved = saved;
     }
 }
 
@@ -647,8 +657,8 @@ impl Plugins {
         for setting in &declared {
             let key = setting.key.as_str();
             let value = match (setting.kind, new.get(key)) {
-                (SettingKind::Secret, None) => plugin.values.get(key).cloned(),
-                (SettingKind::Secret, Some(Value::String(text))) if text.is_empty() => plugin.values.get(key).cloned(),
+                (SettingKind::Secret, None) => plugin.saved.get(key).cloned(),
+                (SettingKind::Secret, Some(Value::String(text))) if text.is_empty() => plugin.saved.get(key).cloned(),
                 (_, None | Some(Value::Null)) => None,
                 (kind, Some(value)) => Some(checked(kind, key, value)?),
             };
@@ -657,7 +667,7 @@ impl Plugins {
             }
         }
         let changed: Vec<&str> =
-            declared.iter().map(|s| s.key.as_str()).filter(|key| values.get(*key) != plugin.values.get(*key)).collect();
+            declared.iter().map(|s| s.key.as_str()).filter(|key| values.get(*key) != plugin.saved.get(*key)).collect();
 
         let row = plugin_config::ActiveModel {
             app_id: Set(id.to_owned()),
@@ -754,7 +764,7 @@ impl Plugins {
         if let Some(previous) = &previous {
             plugin.limits = previous.limits;
             plugin.reach = previous.reach;
-            plugin.set_values(previous.values.clone());
+            plugin.set_values(previous.saved.clone());
         }
         let mut plugins = self.list();
         match plugins.iter_mut().find(|p| p.id == id) {
@@ -984,7 +994,7 @@ impl Registry {
 }
 
 fn new_plugin(id: String, source: Source, manifest: Option<Manifest>) -> Plugin {
-    Plugin {
+    let mut plugin = Plugin {
         id,
         source,
         manifest,
@@ -996,25 +1006,19 @@ fn new_plugin(id: String, source: Source, manifest: Option<Manifest>) -> Plugin 
         settings: Map::new(),
         secrets_set: Vec::new(),
         values: Map::new(),
+        saved: Map::new(),
         queue: BTreeMap::new(),
         storage: Usage::default(),
         download: None,
         load_error: None,
-    }
+    };
+    plugin.set_values(Map::new());
+    plugin
 }
 
 /// A setting's value if it fits the setting's kind.
 fn checked(kind: SettingKind, key: &str, value: &Value) -> Result<Value> {
-    let fits = match (kind, value) {
-        (SettingKind::Bool, Value::Bool(_)) => true,
-        (SettingKind::Number, Value::Number(n)) => n.is_i64(),
-        (SettingKind::Text | SettingKind::Secret, Value::String(text)) => text.chars().count() <= TEXT_LIMIT,
-        (SettingKind::List, Value::Array(lines)) => {
-            lines.len() <= LIST_LIMIT
-                && lines.iter().all(|line| line.as_str().is_some_and(|line| line.chars().count() <= TEXT_LIMIT))
-        }
-        _ => false,
-    };
+    let fits = serde_json::from_value::<SettingValue>(value.clone()).is_ok_and(|value| value.fits(kind));
     if !fits {
         return Err(invalid_settings(format!("\"{key}\" is not a valid {kind:?} value").to_lowercase()));
     }

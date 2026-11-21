@@ -3,7 +3,7 @@
 // The server instantiates the app for each request to its routes
 // (`/app/<id>/...`) and calls `handle`. The app reaches the server only
 // through the interfaces it imports here; everything else is denied.
-package rustcloud:app@0.2.19;
+package rustcloud:app@0.2.20;
 
 interface types {
     /// An HTTP request to the app's routes.
@@ -270,8 +270,9 @@ interface shares {
 /// (since 0.2.2).
 interface settings {
     /// A JSON object, key → value: `true`, a number, a string or a list of
-    /// strings. Settings never filled in are missing. Secrets (API keys) are
-    /// included: the app needs them, the browser never gets them back.
+    /// strings. A setting left empty has the manifest's `default` (since
+    /// 0.2.20), or is missing without one. Secrets (API keys) are included:
+    /// the app needs them, the browser never gets them back.
     values: func() -> string;
 }
 

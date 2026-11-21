@@ -359,6 +359,41 @@ pub struct ServerSetting {
     /// For numbers, e.g. `s` or `MiB`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+    /// What the app gets while the administrator leaves the setting empty
+    /// (since 0.2.20), of the setting's kind; secrets have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<SettingValue>,
+}
+
+/// The most characters of a `text` or `secret` setting, and of each line of
+/// a `list`.
+pub const SETTING_TEXT_LIMIT: usize = 10_000;
+/// The most lines of a `list` setting.
+pub const SETTING_LIST_LIMIT: usize = 1_000;
+
+/// A value of a server setting, as JSON gives it to the app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SettingValue {
+    Bool(bool),
+    Number(i64),
+    Text(String),
+    List(Vec<String>),
+}
+
+impl SettingValue {
+    /// Whether it is a value of `kind`, within the limits.
+    pub fn fits(&self, kind: SettingKind) -> bool {
+        let short = |text: &str| text.chars().count() <= SETTING_TEXT_LIMIT;
+        match (kind, self) {
+            (SettingKind::Bool, Self::Bool(_)) | (SettingKind::Number, Self::Number(_)) => true,
+            (SettingKind::Text | SettingKind::Secret, Self::Text(text)) => short(text),
+            (SettingKind::List, Self::List(lines)) => {
+                lines.len() <= SETTING_LIST_LIMIT && lines.iter().all(|line| short(line))
+            }
+            _ => false,
+        }
+    }
 }
 
 /// How a server setting of a plugin is edited and stored.
@@ -611,6 +646,20 @@ impl Manifest {
                     "app \"{}\": server setting \"{}\" needs a unique lower-case key and an English label",
                     self.id, setting.key
                 )));
+            }
+            let default_fits = match &setting.default {
+                None => true,
+                Some(_) if setting.kind == SettingKind::Secret => false,
+                Some(value) => value.fits(setting.kind),
+            };
+            if !default_fits {
+                return Err(ManifestError(
+                    format!(
+                        "app \"{}\": the default of server setting \"{}\" must be a {:?} value; secrets have none",
+                        self.id, setting.key, setting.kind
+                    )
+                    .to_lowercase(),
+                ));
             }
         }
         if self.server_settings.len() > 50 {
@@ -889,6 +938,33 @@ mod tests {
         let keys: Vec<&str> = manifest.server_settings.iter().map(|s| s.key.as_str()).collect();
         assert_eq!(keys, ["model", "api_key"]);
         assert_eq!(manifest.server_settings[1].kind, SettingKind::Secret);
+    }
+
+    #[test]
+    fn server_settings_may_have_defaults_of_their_kind() {
+        let setting = |kind: &str, default: &str| {
+            format!(
+                "{NOTES}\n[[server_settings]]\nkey = \"s\"\nkind = \"{kind}\"\nlabel.en = \"S\"\ndefault = {default}\n"
+            )
+        };
+        for (kind, default, value) in [
+            ("bool", "true", SettingValue::Bool(true)),
+            ("number", "30", SettingValue::Number(30)),
+            ("text", "\"small\"", SettingValue::Text("small".into())),
+            ("list", "[\"en\", \"ru\"]", SettingValue::List(vec!["en".into(), "ru".into()])),
+        ] {
+            let manifest = Manifest::from_toml(&setting(kind, default)).expect(kind);
+            assert_eq!(manifest.server_settings[0].default, Some(value), "{kind}");
+        }
+        assert_eq!(serde_json::to_string(&SettingValue::List(vec!["a".into()])).unwrap(), r#"["a"]"#);
+        for (kind, default) in
+            [("bool", "1"), ("number", "\"30\""), ("number", "1.5"), ("text", "[\"a\"]"), ("secret", "\"k\"")]
+        {
+            let err = Manifest::from_toml(&setting(kind, default)).expect_err(kind);
+            assert!(err.0.contains("default") || err.0.contains("did not match"), "{kind} {default}: {err}");
+        }
+        let long = format!("\"{}\"", "a".repeat(SETTING_TEXT_LIMIT + 1));
+        assert!(Manifest::from_toml(&setting("text", &long)).is_err(), "within the limits");
     }
 
     #[test]

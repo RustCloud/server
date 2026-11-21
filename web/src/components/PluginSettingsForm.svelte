@@ -1,6 +1,8 @@
 <!--
   The server settings of one plugin, as its manifest declares them. Secrets
   are never shown: an empty field keeps the saved one, "Clear" removes it.
+  An empty field of another kind gives the plugin the manifest's default,
+  shown greyed in the field.
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
@@ -18,7 +20,7 @@
       const value = saved.settings[setting.key];
       draft[setting.key] =
         setting.kind === 'bool'
-          ? value === true
+          ? (value ?? setting.default) === true
           : setting.kind === 'number'
             ? (value ?? null)
             : setting.kind === 'list'
@@ -38,6 +40,10 @@
   let error = $state(false);
 
   const text = (names: Record<string, string> | undefined) => (names ? (names[locale] ?? names.en ?? '') : '');
+
+  /** The default, as the empty field shows it. */
+  const placeholder = (setting: ServerSetting) =>
+    Array.isArray(setting.default) ? setting.default.join('\n') : String(setting.default ?? '');
 
   /** The values to send: empty fields clear a setting, an empty secret keeps the saved one. */
   function values(): Record<string, unknown> {
@@ -92,11 +98,11 @@
         {text(setting.label)}
         {#if setting.kind === 'number'}
           <span class="row">
-            <input type="number" bind:value={draft[setting.key]} />
+            <input type="number" placeholder={placeholder(setting)} bind:value={draft[setting.key]} />
             {#if setting.unit}<span class="muted small">{t.units[setting.unit] ?? setting.unit}</span>{/if}
           </span>
         {:else if setting.kind === 'list'}
-          <textarea rows="3" bind:value={draft[setting.key]}></textarea>
+          <textarea rows="3" placeholder={placeholder(setting)} bind:value={draft[setting.key]}></textarea>
         {:else if setting.kind === 'secret'}
           {@const set = plugin.secrets_set.includes(setting.key)}
           <span class="row">
@@ -115,7 +121,7 @@
             {/if}
           </span>
         {:else}
-          <input bind:value={draft[setting.key]} />
+          <input placeholder={placeholder(setting)} bind:value={draft[setting.key]} />
         {/if}
       </label>
     {/if}

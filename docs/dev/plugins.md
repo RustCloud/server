@@ -11,9 +11,9 @@
 > хранилище плагина со скачиванием моделей, фоновые задачи.
 > Дальше: «Открыть с помощью…» и доступ к открытому файлу.
 
-Версия API — `0.2.16` ([plugin-api/src/lib.rs](../../crates/plugin-api/src/lib.rs)). До 1.0 минорная
+Версия API — `0.2.20` ([plugin-api/src/lib.rs](../../crates/plugin-api/src/lib.rs)). До 1.0 минорная
 версия может ломать: в 0.2.0 у записей AppData появились `etag` и `updated-at`, `write` возвращает запись.
-Патч-версии только добавляют: 0.2.1 — импорт `shares`, 0.2.2 — `settings`, 0.2.3 — `http`, 0.2.4 — `storage`, 0.2.5 — `jobs` и мир `app-with-jobs`, 0.2.6 — `on` и `mime` у `[[jobs]]`, 0.2.7 — `use-ffmpeg`, 0.2.8 — события `file.deleted` и `file.moved`, 0.2.9 — `[limits]` в манифесте и импорт `limits`, 0.2.10 — `read-range`, `links` и ответ файлом (`x-rustcloud-send`), 0.2.11 — `links.video-stream`, 0.2.12 — `links.upload`, 0.2.13 — `use-onnx`, 0.2.14 — `[[open_with]]` в манифесте, полный экран и `close` на странице, `write-if-match`, `write-request-body` и `large_bodies`, блокировки, версии, `links.replace`, `tokens`, адреса из настроек и `permissions.frame`, 0.2.15 — `[[proxy]]` в манифесте и импорт `proxy`, 0.2.16 — `[[new_files]]` и `status` в манифесте, 0.2.17 — `extensions` у `[[open_with]]`, 0.2.18 — `permissions.images`, 0.2.19 — `appdata.write-if-match`, `permissions.connect`, `permissions.deliver`, `jobs.add-for`, `notify`, `links.thumbnail`, `shares.unshare`, `webhooks` и `one_batch_per_user`; плагины, собранные под
+Патч-версии только добавляют: 0.2.1 — импорт `shares`, 0.2.2 — `settings`, 0.2.3 — `http`, 0.2.4 — `storage`, 0.2.5 — `jobs` и мир `app-with-jobs`, 0.2.6 — `on` и `mime` у `[[jobs]]`, 0.2.7 — `use-ffmpeg`, 0.2.8 — события `file.deleted` и `file.moved`, 0.2.9 — `[limits]` в манифесте и импорт `limits`, 0.2.10 — `read-range`, `links` и ответ файлом (`x-rustcloud-send`), 0.2.11 — `links.video-stream`, 0.2.12 — `links.upload`, 0.2.13 — `use-onnx`, 0.2.14 — `[[open_with]]` в манифесте, полный экран и `close` на странице, `write-if-match`, `write-request-body` и `large_bodies`, блокировки, версии, `links.replace`, `tokens`, адреса из настроек и `permissions.frame`, 0.2.15 — `[[proxy]]` в манифесте и импорт `proxy`, 0.2.16 — `[[new_files]]` и `status` в манифесте, 0.2.17 — `extensions` у `[[open_with]]`, 0.2.18 — `permissions.images`, 0.2.19 — `appdata.write-if-match`, `permissions.connect`, `permissions.deliver`, `jobs.add-for`, `notify`, `links.thumbnail`, `shares.unshare`, `webhooks` и `one_batch_per_user`, 0.2.20 — `default` у `[[server_settings]]`; плагины, собранные под
 0.2.0, работают без пересборки.
 
 ## Контракт
@@ -188,7 +188,8 @@ let values: serde_json::Value = serde_json::from_str(&settings::values()).unwrap
 let key = values["api_key"].as_str();      // None — не заполнено
 ```
 
-`values()` — JSON-объект: `true`, число, строка или список строк; незаполненных ключей нет. Секреты
+`values()` — JSON-объект: `true`, число, строка или список строк; незаполненных ключей нет. С 0.2.20
+у настройки может быть `default` в манифесте — тогда незаполненная приходит со значением по умолчанию. Секреты
 плагин получает, браузер — никогда. Отдавать их на свою страницу плагин не должен.
 Воспользоваться ключом — через [сеть](#сеть).
 
