@@ -59,10 +59,26 @@ fn identity_model() -> Vec<u8> {
     model("Identity", vec![value("ids", 7, &[Some(2)])], value("same", 7, &[Some(2)]))
 }
 
+/// An f32 tensor whose dimensions are named by symbols of their own.
+fn symbolic(name: &str, symbols: &[&str]) -> pb::ValueInfoProto {
+    use pb::tensor_shape_proto::{dimension::Value, Dimension};
+    let mut info = value(name, 1, &[]);
+    if let Some(pb::type_proto::Value::TensorType(tensor)) = info.r#type.as_mut().and_then(|t| t.value.as_mut()) {
+        let dim = symbols
+            .iter()
+            .map(|symbol| Dimension { denotation: String::new(), value: Some(Value::DimParam((*symbol).into())) })
+            .collect();
+        tensor.shape = Some(pb::TensorShapeProto { dim });
+    }
+    info
+}
+
 /// `sum = a + b + a`, with a wrong hint about the tensor in between: of
 /// an undefined type (tract can't read it) or of `elem_type` 6, i32 (tract
-/// reads it, and can't plan with it).
-fn misdescribed_model(hint: i32) -> Vec<u8> {
+/// reads it, and can't plan with it). With `output`, the output is also
+/// hinted with sizes of its own, unrelated to the inputs', as the PP-OCRv5
+/// text detector has.
+fn misdescribed_model(hint: i32, output: bool) -> Vec<u8> {
     let shape = [None, Some(3)];
     let add = |inputs: [&str; 2], output: &str| pb::NodeProto {
         input: inputs.map(String::from).to_vec(),
@@ -75,7 +91,10 @@ fn misdescribed_model(hint: i32) -> Vec<u8> {
         node: vec![add(["a", "b"], "partial"), add(["partial", "a"], "sum")],
         input: vec![value("a", 1, &shape), value("b", 1, &shape)],
         output: vec![value("sum", 1, &shape)],
-        value_info: vec![value("partial", hint, &shape)],
+        value_info: [value("partial", hint, &shape)]
+            .into_iter()
+            .chain(output.then(|| symbolic("sum", &["sum_d0", "sum_d1"])))
+            .collect(),
         ..Default::default()
     };
     let opset = pb::OperatorSetIdProto { domain: String::new(), version: 13 };
@@ -213,16 +232,17 @@ async fn a_broken_model_is_refused() {
 #[tokio::test]
 async fn a_wrong_hint_inside_a_model_is_ignored() {
     use tract_onnx::prelude::{DatumType, Framework, InferenceFact, InferenceModelExt};
-    let unreadable = misdescribed_model(0);
+    let unreadable = misdescribed_model(0, false);
     assert!(tract_onnx::onnx().model_for_read(&mut &unreadable[..]).is_err(), "tract takes the hint by itself");
-    let unplannable = misdescribed_model(6);
+    let unplannable = misdescribed_model(6, false);
     let read = tract_onnx::onnx().model_for_read(&mut &unplannable[..]).expect("read with the hint");
     let fact = || InferenceFact::dt_shape(DatumType::F32, [1usize, 3]);
     let fixed = read.with_input_fact(0, fact()).and_then(|model| model.with_input_fact(1, fact()));
     assert!(fixed.and_then(|model| model.into_optimized()).is_err(), "planned with the hint, it fails");
 
     let onnx = engine(OnnxSettings::default()).await;
-    for (app, bytes) in [("unreadable", unreadable), ("unplannable", unplannable)] {
+    let output = misdescribed_model(6, true);
+    for (app, bytes) in [("unreadable", unreadable), ("unplannable", unplannable), ("output", output)] {
         let stored = Stored::new(app, &bytes);
         for batch in [1u32, 2] {
             let a: Vec<f32> = (0..batch * 3).map(|v| v as f32).collect();

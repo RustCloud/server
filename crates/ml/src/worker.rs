@@ -288,18 +288,23 @@ fn plan_for(model: &InferenceModel, inputs: &[Header]) -> Result<Arc<TypedRunnab
     model.into_optimized().and_then(|model| model.into_runnable()).map_err(failed)
 }
 
-/// `model` with nothing known of the tensors between its inputs and
-/// outputs, as if its file had no `value_info`: tract works them out from
-/// the operations.
+/// `model` with nothing known of its tensors but the inputs and the types
+/// of its outputs, as if its file had no `value_info`: tract works the rest
+/// out from the operations. The outputs' declared shapes go too: they may
+/// be as wrong as the hints (sizes of their own, unrelated to the inputs').
 fn without_hints(model: &InferenceModel) -> InferenceModel {
     let mut plain = model.clone();
-    let ends: Vec<OutletId> = plain.inputs.iter().chain(&plain.outputs).copied().collect();
     for node in 0..plain.nodes().len() {
         for slot in 0..plain.node(node).outputs.len() {
             let outlet = OutletId::new(node, slot);
-            if !ends.contains(&outlet) {
-                plain.set_outlet_fact(outlet, InferenceFact::default()).expect("the outlet exists");
+            if plain.inputs.contains(&outlet) {
+                continue;
             }
+            let mut fact = InferenceFact::default();
+            if plain.outputs.contains(&outlet) {
+                fact.datum_type = plain.outlet_fact(outlet).expect("the outlet exists").datum_type;
+            }
+            plain.set_outlet_fact(outlet, fact).expect("the outlet exists");
         }
     }
     plain
