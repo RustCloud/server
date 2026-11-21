@@ -59,6 +59,29 @@ fn identity_model() -> Vec<u8> {
     model("Identity", vec![value("ids", 7, &[Some(2)])], value("same", 7, &[Some(2)]))
 }
 
+/// `sum = a + b + a`, with a wrong hint about the tensor in between (of
+/// an undefined type), as some exporters write.
+fn misdescribed_model() -> Vec<u8> {
+    let shape = [None, Some(3)];
+    let add = |inputs: [&str; 2], output: &str| pb::NodeProto {
+        input: inputs.map(String::from).to_vec(),
+        output: vec![output.into()],
+        op_type: "Add".into(),
+        ..Default::default()
+    };
+    let graph = pb::GraphProto {
+        name: "misdescribed".into(),
+        node: vec![add(["a", "b"], "partial"), add(["partial", "a"], "sum")],
+        input: vec![value("a", 1, &shape), value("b", 1, &shape)],
+        output: vec![value("sum", 1, &shape)],
+        value_info: vec![value("partial", 0, &shape)],
+        ..Default::default()
+    };
+    let opset = pb::OperatorSetIdProto { domain: String::new(), version: 13 };
+    pb::ModelProto { ir_version: 7, opset_import: vec![opset], graph: Some(graph), ..Default::default() }
+        .encode_to_vec()
+}
+
 /// A model file on disk and how many times the engine opened it.
 struct Stored {
     file: tempfile::NamedTempFile,
@@ -184,6 +207,19 @@ async fn a_broken_model_is_refused() {
     assert_eq!(err.code, "ONNX_FAILED");
     assert!(err.message.starts_with("the model can't be loaded"), "{}", err.message);
     assert!(onnx.loaded().is_empty());
+}
+
+#[tokio::test]
+async fn a_wrong_hint_inside_a_model_is_ignored() {
+    use tract_onnx::prelude::Framework;
+    let bytes = misdescribed_model();
+    assert!(tract_onnx::onnx().model_for_read(&mut &bytes[..]).is_err(), "tract takes the hint by itself");
+
+    let onnx = engine(OnnxSettings::default()).await;
+    let stored = Stored::new("app", &bytes);
+    let inputs = vec![input("a", vec![1, 3], &[1.0, 2.0, 3.0]), input("b", vec![1, 3], &[10.0, 20.0, 30.0])];
+    let outputs = onnx.run(&stored.model, || stored.open(), inputs, 1 << 20, Priority::Request).await.unwrap();
+    assert_eq!(floats(&outputs[0].tensor), [12.0, 24.0, 36.0]);
 }
 
 #[tokio::test]

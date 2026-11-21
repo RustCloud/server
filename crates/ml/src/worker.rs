@@ -57,7 +57,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
     let Some(bytes) = protocol::read_frame(&mut input, u64::MAX).map_err(io)? else {
         return Ok(());
     };
-    let mut model = match catch(|| Model::load(&bytes)) {
+    let mut model = match catch(|| read(bytes)).and_then(|source| catch(|| Model::load(source))) {
         Ok(model) => model,
         Err(why) => {
             protocol::write_message(&mut output, &Reply::Failed(why.clone())).map_err(io)?;
@@ -65,7 +65,6 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
             return Err(why);
         }
     };
-    drop(bytes);
     protocol::write_message(&mut output, &Reply::Loaded(model.info.clone())).map_err(io)?;
     output.flush().map_err(io)?;
 
@@ -137,9 +136,28 @@ fn failed(err: impl std::fmt::Display) -> String {
     format!("{err:#}").chars().take(500).collect()
 }
 
+/// The model in the file `bytes`.
+///
+/// The file is decoded once and let go before the model is built from it,
+/// so a load holds about two copies of the weights at most, not three.
+///
+/// A file may describe the tensors between its operations (`value_info`)
+/// wrongly, as some exporters do; tract then can't build the model. Those
+/// descriptions are only hints, so such a model is built again without
+/// them, and tract works the tensors out itself. Both tries read the same
+/// decoded file, in this confined process.
+fn read(bytes: Vec<u8>) -> Result<InferenceModel, String> {
+    use prost::Message;
+    let proto = tract_onnx::pb::ModelProto::decode(&bytes[..]).map_err(failed)?;
+    drop(bytes);
+    match catch(|| tract_onnx::onnx().model_for_proto_model(&proto).map_err(failed)) {
+        Ok(model) => Ok(model),
+        Err(why) => tract_onnx::onnx().with_ignore_value_info(true).model_for_proto_model(&proto).map_err(|_| why),
+    }
+}
+
 impl Model {
-    fn load(bytes: &[u8]) -> Result<Self, String> {
-        let source = tract_onnx::onnx().model_for_read(&mut &bytes[..]).map_err(failed)?;
+    fn load(source: InferenceModel) -> Result<Self, String> {
         let declared = (0..source.inputs.len())
             .map(|index| {
                 let outlet = source.inputs[index];
