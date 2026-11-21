@@ -59,9 +59,10 @@ fn identity_model() -> Vec<u8> {
     model("Identity", vec![value("ids", 7, &[Some(2)])], value("same", 7, &[Some(2)]))
 }
 
-/// `sum = a + b + a`, with a wrong hint about the tensor in between (of
-/// an undefined type), as some exporters write.
-fn misdescribed_model() -> Vec<u8> {
+/// `sum = a + b + a`, with a wrong hint about the tensor in between: of
+/// an undefined type (tract can't read it) or of `elem_type` 6, i32 (tract
+/// reads it, and can't plan with it).
+fn misdescribed_model(hint: i32) -> Vec<u8> {
     let shape = [None, Some(3)];
     let add = |inputs: [&str; 2], output: &str| pb::NodeProto {
         input: inputs.map(String::from).to_vec(),
@@ -74,7 +75,7 @@ fn misdescribed_model() -> Vec<u8> {
         node: vec![add(["a", "b"], "partial"), add(["partial", "a"], "sum")],
         input: vec![value("a", 1, &shape), value("b", 1, &shape)],
         output: vec![value("sum", 1, &shape)],
-        value_info: vec![value("partial", 0, &shape)],
+        value_info: vec![value("partial", hint, &shape)],
         ..Default::default()
     };
     let opset = pb::OperatorSetIdProto { domain: String::new(), version: 13 };
@@ -211,15 +212,27 @@ async fn a_broken_model_is_refused() {
 
 #[tokio::test]
 async fn a_wrong_hint_inside_a_model_is_ignored() {
-    use tract_onnx::prelude::Framework;
-    let bytes = misdescribed_model();
-    assert!(tract_onnx::onnx().model_for_read(&mut &bytes[..]).is_err(), "tract takes the hint by itself");
+    use tract_onnx::prelude::{DatumType, Framework, InferenceFact, InferenceModelExt};
+    let unreadable = misdescribed_model(0);
+    assert!(tract_onnx::onnx().model_for_read(&mut &unreadable[..]).is_err(), "tract takes the hint by itself");
+    let unplannable = misdescribed_model(6);
+    let read = tract_onnx::onnx().model_for_read(&mut &unplannable[..]).expect("read with the hint");
+    let fact = || InferenceFact::dt_shape(DatumType::F32, [1usize, 3]);
+    let fixed = read.with_input_fact(0, fact()).and_then(|model| model.with_input_fact(1, fact()));
+    assert!(fixed.and_then(|model| model.into_optimized()).is_err(), "planned with the hint, it fails");
 
     let onnx = engine(OnnxSettings::default()).await;
-    let stored = Stored::new("app", &bytes);
-    let inputs = vec![input("a", vec![1, 3], &[1.0, 2.0, 3.0]), input("b", vec![1, 3], &[10.0, 20.0, 30.0])];
-    let outputs = onnx.run(&stored.model, || stored.open(), inputs, 1 << 20, Priority::Request).await.unwrap();
-    assert_eq!(floats(&outputs[0].tensor), [12.0, 24.0, 36.0]);
+    for (app, bytes) in [("unreadable", unreadable), ("unplannable", unplannable)] {
+        let stored = Stored::new(app, &bytes);
+        for batch in [1u32, 2] {
+            let a: Vec<f32> = (0..batch * 3).map(|v| v as f32).collect();
+            let b = vec![10.0; a.len()];
+            let inputs = vec![input("a", vec![batch, 3], &a), input("b", vec![batch, 3], &b)];
+            let outputs = onnx.run(&stored.model, || stored.open(), inputs, 1 << 20, Priority::Request).await;
+            let expected: Vec<f32> = a.iter().map(|v| v * 2.0 + 10.0).collect();
+            assert_eq!(floats(&outputs.expect(app)[0].tensor), expected, "{app}, batch {batch}");
+        }
+    }
 }
 
 #[tokio::test]

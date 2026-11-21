@@ -145,7 +145,9 @@ fn failed(err: impl std::fmt::Display) -> String {
 /// wrongly, as some exporters do; tract then can't build the model. Those
 /// descriptions are only hints, so such a model is built again without
 /// them, and tract works the tensors out itself. Both tries read the same
-/// decoded file, in this confined process.
+/// decoded file, in this confined process. Hints that only fail once the
+/// model is planned for the shapes of a run are dropped there
+/// ([`Model::plan`]).
 fn read(bytes: Vec<u8>) -> Result<InferenceModel, String> {
     use prost::Message;
     let proto = tract_onnx::pb::ModelProto::decode(&bytes[..]).map_err(failed)?;
@@ -257,18 +259,50 @@ impl Model {
         if let Some(plan) = self.by_shape.get(inputs) {
             return Ok(plan.clone());
         }
-        let mut model = self.source.clone();
-        for (index, input) in inputs.iter().enumerate() {
-            let shape: Vec<usize> = input.shape.iter().map(|&dim| dim as usize).collect();
-            model = model.with_input_fact(index, InferenceFact::dt_shape(datum(input.dtype), shape)).map_err(failed)?;
-        }
-        let plan = model.into_optimized().and_then(|model| model.into_runnable()).map_err(failed)?;
+        let plan = match plan_for(&self.source, inputs) {
+            Ok(plan) => plan,
+            // The file's hints about the tensors in between may be what is
+            // wrong (see `read`): plan without them, and keep to that.
+            Err(why) => {
+                let plain = without_hints(&self.source);
+                let plan = plan_for(&plain, inputs).map_err(|_| why)?;
+                self.source = plain;
+                plan
+            }
+        };
         if self.by_shape.len() >= SHAPE_PLANS {
             self.by_shape.clear();
         }
         self.by_shape.insert(inputs.to_vec(), plan.clone());
         Ok(plan)
     }
+}
+
+/// A plan of `model` for inputs of these types and shapes, in its order.
+fn plan_for(model: &InferenceModel, inputs: &[Header]) -> Result<Arc<TypedRunnableModel>, String> {
+    let mut model = model.clone();
+    for (index, input) in inputs.iter().enumerate() {
+        let shape: Vec<usize> = input.shape.iter().map(|&dim| dim as usize).collect();
+        model = model.with_input_fact(index, InferenceFact::dt_shape(datum(input.dtype), shape)).map_err(failed)?;
+    }
+    model.into_optimized().and_then(|model| model.into_runnable()).map_err(failed)
+}
+
+/// `model` with nothing known of the tensors between its inputs and
+/// outputs, as if its file had no `value_info`: tract works them out from
+/// the operations.
+fn without_hints(model: &InferenceModel) -> InferenceModel {
+    let mut plain = model.clone();
+    let ends: Vec<OutletId> = plain.inputs.iter().chain(&plain.outputs).copied().collect();
+    for node in 0..plain.nodes().len() {
+        for slot in 0..plain.node(node).outputs.len() {
+            let outlet = OutletId::new(node, slot);
+            if !ends.contains(&outlet) {
+                plain.set_outlet_fact(outlet, InferenceFact::default()).expect("the outlet exists");
+            }
+        }
+    }
+    plain
 }
 
 /// Whether a given input is of the type and shape the model declares, with
