@@ -33,6 +33,7 @@ impl MigratorTrait for Migrator {
             Box::new(EmailVerified),
             Box::new(Delivery),
             Box::new(SharedThroughApps),
+            Box::new(FileBirth),
         ]
     }
 }
@@ -910,5 +911,26 @@ impl MigrationTrait for SharedThroughApps {
                     .to_owned(),
             )
             .await
+    }
+}
+
+/// When a file was created on the device it came from, as its client says
+/// (`nodes.born_at`; `NULL`: unknown, the same as `created_at`), and the time
+/// an upload session gives the file it makes (`upload_sessions.ctime`).
+struct FileBirth;
+
+impl MigrationName for FileBirth {
+    fn name(&self) -> &str {
+        "m0024_file_birth"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for FileBirth {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let born = timestamp_with_time_zone_null("born_at");
+        manager.alter_table(Table::alter().table("nodes").add_column(born).to_owned()).await?;
+        let ctime = timestamp_with_time_zone_null("ctime");
+        manager.alter_table(Table::alter().table("upload_sessions").add_column(ctime).to_owned()).await
     }
 }

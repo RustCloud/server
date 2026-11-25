@@ -87,7 +87,7 @@ pub use events::{FileEvent, FileEventKind, WatchedFile};
 pub use grants::{Grant, GrantKind, NewGrant, CLOSE_GRACE, KEEP_ALIVE_EVERY, SESSION_IDLE, SESSION_MAX};
 pub use http::router;
 pub use locks::{FileLock, Locking, LOCK_MAX};
-pub use service::{guess_mime, Download, Files, Node, NodeUpdate, Usage};
+pub use service::{guess_mime, Download, FileTimes, Files, Node, NodeUpdate, Usage};
 pub use settings::FilesSettings;
 pub use shares::{PublicView, Share, ShareOptions, LINK_COOKIE};
 pub use sharing::{Access, Given, GroupRef, NewAccess, Received};

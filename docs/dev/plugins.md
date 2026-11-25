@@ -11,9 +11,9 @@
 > хранилище плагина со скачиванием моделей, фоновые задачи.
 > Дальше: «Открыть с помощью…» и доступ к открытому файлу.
 
-Версия API — `0.2.20` ([plugin-api/src/lib.rs](../../crates/plugin-api/src/lib.rs)). До 1.0 минорная
+Версия API — `0.2.21` ([plugin-api/src/lib.rs](../../crates/plugin-api/src/lib.rs)). До 1.0 минорная
 версия может ломать: в 0.2.0 у записей AppData появились `etag` и `updated-at`, `write` возвращает запись.
-Патч-версии только добавляют: 0.2.1 — импорт `shares`, 0.2.2 — `settings`, 0.2.3 — `http`, 0.2.4 — `storage`, 0.2.5 — `jobs` и мир `app-with-jobs`, 0.2.6 — `on` и `mime` у `[[jobs]]`, 0.2.7 — `use-ffmpeg`, 0.2.8 — события `file.deleted` и `file.moved`, 0.2.9 — `[limits]` в манифесте и импорт `limits`, 0.2.10 — `read-range`, `links` и ответ файлом (`x-rustcloud-send`), 0.2.11 — `links.video-stream`, 0.2.12 — `links.upload`, 0.2.13 — `use-onnx`, 0.2.14 — `[[open_with]]` в манифесте, полный экран и `close` на странице, `write-if-match`, `write-request-body` и `large_bodies`, блокировки, версии, `links.replace`, `tokens`, адреса из настроек и `permissions.frame`, 0.2.15 — `[[proxy]]` в манифесте и импорт `proxy`, 0.2.16 — `[[new_files]]` и `status` в манифесте, 0.2.17 — `extensions` у `[[open_with]]`, 0.2.18 — `permissions.images`, 0.2.19 — `appdata.write-if-match`, `permissions.connect`, `permissions.deliver`, `jobs.add-for`, `notify`, `links.thumbnail`, `shares.unshare`, `webhooks` и `one_batch_per_user`, 0.2.20 — `default` у `[[server_settings]]`; плагины, собранные под
+Патч-версии только добавляют: 0.2.1 — импорт `shares`, 0.2.2 — `settings`, 0.2.3 — `http`, 0.2.4 — `storage`, 0.2.5 — `jobs` и мир `app-with-jobs`, 0.2.6 — `on` и `mime` у `[[jobs]]`, 0.2.7 — `use-ffmpeg`, 0.2.8 — события `file.deleted` и `file.moved`, 0.2.9 — `[limits]` в манифесте и импорт `limits`, 0.2.10 — `read-range`, `links` и ответ файлом (`x-rustcloud-send`), 0.2.11 — `links.video-stream`, 0.2.12 — `links.upload`, 0.2.13 — `use-onnx`, 0.2.14 — `[[open_with]]` в манифесте, полный экран и `close` на странице, `write-if-match`, `write-request-body` и `large_bodies`, блокировки, версии, `links.replace`, `tokens`, адреса из настроек и `permissions.frame`, 0.2.15 — `[[proxy]]` в манифесте и импорт `proxy`, 0.2.16 — `[[new_files]]` и `status` в манифесте, 0.2.17 — `extensions` у `[[open_with]]`, 0.2.18 — `permissions.images`, 0.2.19 — `appdata.write-if-match`, `permissions.connect`, `permissions.deliver`, `jobs.add-for`, `notify`, `links.thumbnail`, `shares.unshare`, `webhooks` и `one_batch_per_user`, 0.2.20 — `default` у `[[server_settings]]`, 0.2.21 — `files.get-times`; плагины, собранные под
 0.2.0, работают без пересборки.
 
 ## Контракт
@@ -24,6 +24,7 @@
 | `import log.info`, `log.warn` | лог сервера с id плагина; `warn` попадает в [журнал](../admin.md#журнал) |
 | `import appdata.read`, `write`, `write-if-match`, `list`, `delete` | данные плагина для пользователя запроса — см. [AppData](#appdata) |
 | `import files.granted`, `get`, `children`, `read`, `write`, `create-file`, `create-folder`, `delete` | файлы пользователя, к которым он дал доступ — см. [Файлы пользователя](#файлы-пользователя) |
+| `import files.get-times` | время файла от загрузившего его клиента: изменения и создания на устройстве — см. [Файлы пользователя](#файлы-пользователя) (с 0.2.21) |
 | `import settings.values` | настройки плагина для всего сервера — см. [Настройки сервера](#настройки-сервера) (с 0.2.2) |
 | `import http.fetch` | HTTP-запрос к серверу из манифеста — см. [Сеть](#сеть) (с 0.2.3) |
 | `import storage.list`, `stat`, `read`, `write`, `delete` | своё хранилище плагина на сервере — см. [Хранилище плагина](#хранилище-плагина) (с 0.2.4) |
@@ -88,6 +89,11 @@
   ошибка `locked` с её данными, так плагин отвечает по WOPI «файл заблокирован другим».
 - `versions(id)`, `read-version(id, version-id, offset, length)` (с 0.2.14) — прежние
   [версии](../api/files.md#версии) файла; запись плагином сама сохраняет версию, как любая замена.
+- `get-times(id)` (с 0.2.21) — время файла от клиента, который его загрузил: `modified-at` (mtime;
+  без него — `updated-at`) и `born-at` (когда файл создан на устройстве; без него — когда появился на
+  сервере). `updated-at` в `node` — время последней правки на сервере: у фото, загруженного сегодня,
+  это сегодня, даже если снято год назад. Галерее и всему, что раскладывает файлы по датам, нужен
+  `born-at`.
 
 Доступ к папке страница плагина просит у пользователя:
 

@@ -52,6 +52,9 @@ pub struct Node {
     /// When its content was last changed, as the client that wrote it said
     /// (the mtime of the file on that device); `updated_at` if it didn't say.
     pub modified_at: DateTime<Utc>,
+    /// When the file was created on the device it came from, as its client
+    /// said; `created_at` if it didn't say.
+    pub born_at: DateTime<Utc>,
     /// When it went to the trash; only for what is in it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trashed_at: Option<DateTime<Utc>>,
@@ -74,13 +77,14 @@ impl From<node::Model> for Node {
             created_at: row.created_at,
             updated_at: row.updated_at,
             modified_at: row.modified_at.unwrap_or(row.updated_at),
+            born_at: row.born_at.unwrap_or(row.created_at),
             trashed_at: row.trashed_at,
             lock: None,
         }
     }
 }
 
-/// Rename, move and/or set the mtime. Missing fields stay as they are.
+/// Rename, move and/or set the times of a file. Missing fields stay as they are.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NodeUpdate {
     pub name: Option<String>,
@@ -88,6 +92,19 @@ pub struct NodeUpdate {
     pub parent_id: Option<Uuid>,
     /// New mtime of a file (see [`Node::modified_at`]).
     pub modified_at: Option<DateTime<Utc>>,
+    /// When a file was created on the client's device (see [`Node::born_at`]).
+    pub born_at: Option<DateTime<Utc>>,
+}
+
+/// The times of a file its client tells when uploading it; checked by the
+/// upload.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FileTimes {
+    /// The mtime of the content (see [`Node::modified_at`]).
+    pub mtime: Option<DateTime<Utc>>,
+    /// When the file was created on the client's device (see
+    /// [`Node::born_at`]); taken only by a new file, not by one it replaces.
+    pub ctime: Option<DateTime<Utc>>,
 }
 
 /// Storage used by a user.
@@ -110,6 +127,9 @@ pub(crate) struct Writer<'a> {
     pub if_match: Option<&'a str>,
     /// The mtime of the new content (checked with [`check_mtime`]); `None`: now.
     pub mtime: Option<DateTime<Utc>>,
+    /// When a new file was created on the client's device (checked with
+    /// [`check_ctime`]); an existing file keeps its own.
+    pub ctime: Option<DateTime<Utc>>,
     /// Bytes of the quota already set aside for this content (an upload in
     /// parts that is finishing): they don't count against it twice.
     pub reserved: i64,
@@ -119,7 +139,15 @@ pub(crate) struct Writer<'a> {
 
 impl<'a> Writer<'a> {
     pub fn user() -> Self {
-        Self { app: None, versioning: Versioning::Keep, if_match: None, mtime: None, reserved: 0, sha256: None }
+        Self {
+            app: None,
+            versioning: Versioning::Keep,
+            if_match: None,
+            mtime: None,
+            ctime: None,
+            reserved: 0,
+            sha256: None,
+        }
     }
 
     pub fn app(app_id: &'a str) -> Self {
@@ -288,12 +316,13 @@ impl Files {
         name: &str,
         body: ByteStream,
         overwrite: bool,
-        mtime: Option<DateTime<Utc>>,
+        times: FileTimes,
     ) -> Result<Node> {
         let name = validate::file_name(name)?;
-        let mtime = mtime.map(check_mtime).transpose()?;
+        let mtime = times.mtime.map(check_mtime).transpose()?;
+        let ctime = times.ctime.map(check_ctime).transpose()?;
         let parent = self.writable_folder(user, parent_id).await?;
-        let writer = Writer { mtime, ..Writer::user() };
+        let writer = Writer { mtime, ctime, ..Writer::user() };
         let (file, replaced) = self.put_file(user, &parent, name, body, overwrite, writer).await?;
         let kind = if replaced { FileEventKind::Changed } else { FileEventKind::Created };
         self.emit_for(kind, file.id, None).await;
@@ -332,6 +361,7 @@ impl Files {
         file.sha256 = Set(Some(stored.sha256));
         file.modified_by = Set(Some(user.id));
         file.modified_at = Set(writer.mtime);
+        file.born_at = Set(writer.ctime);
 
         match file.insert(&self.db).await {
             Ok(file) => {
@@ -410,6 +440,12 @@ impl Files {
             }
             row.modified_at = Set(Some(check_mtime(mtime)?));
         }
+        if let Some(ctime) = update.born_at {
+            if node.is_dir {
+                return Err(Error::bad_request("NOT_A_FILE", "Only files have a creation time"));
+            }
+            row.born_at = Set(Some(check_ctime(ctime)?));
+        }
         if let Some(name) = &update.name {
             row.name = Set(validate::file_name(name)?.to_owned());
         }
@@ -436,7 +472,7 @@ impl Files {
         };
         if updated.name != node.name || updated.parent_id != node.parent_id {
             self.note_moved(&node, &updated).await;
-        } else if update.modified_at.is_some() {
+        } else if update.modified_at.is_some() || update.born_at.is_some() {
             self.note(ChangeKind::Changed, &updated).await;
         }
         if updated.name != node.name || updated.parent_id != node.parent_id {
@@ -701,6 +737,7 @@ impl Files {
             copy.sha256 = Set(source.sha256.clone());
             copy.modified_by = Set(source.modified_by);
             copy.modified_at = Set(Some(source.modified_at.unwrap_or(source.updated_at)));
+            copy.born_at = Set(Some(source.born_at.unwrap_or(source.created_at)));
             copy.content_key = Set(Some(key_copy.clone()));
             new_key = Some(key_copy);
         }
@@ -1023,6 +1060,7 @@ fn new_node(owner_id: Uuid, parent_id: Option<Uuid>, name: &str, is_dir: bool) -
         trashed_from: Set(None),
         modified_by: Set(None),
         modified_at: Set(None),
+        born_at: Set(None),
     }
 }
 
@@ -1033,11 +1071,20 @@ const MTIME_AHEAD: chrono::Duration = chrono::Duration::days(1);
 /// An mtime a client sent, if it makes sense: not before 1970 and not in
 /// the future (beyond [`MTIME_AHEAD`]).
 pub(crate) fn check_mtime(mtime: DateTime<Utc>) -> Result<DateTime<Utc>> {
-    if mtime < DateTime::UNIX_EPOCH || mtime > Utc::now() + MTIME_AHEAD {
-        return Err(Error::bad_request("INVALID_MTIME", "The modification time is out of range"));
+    in_range(mtime).ok_or_else(|| Error::bad_request("INVALID_MTIME", "The modification time is out of range"))
+}
+
+/// A creation time a client sent, if it makes sense, as for [`check_mtime`].
+pub(crate) fn check_ctime(ctime: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    in_range(ctime).ok_or_else(|| Error::bad_request("INVALID_CTIME", "The creation time is out of range"))
+}
+
+fn in_range(time: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    if time < DateTime::UNIX_EPOCH || time > Utc::now() + MTIME_AHEAD {
+        return None;
     }
     // Databases keep microseconds.
-    Ok(mtime.trunc_subsecs(6))
+    Some(time.trunc_subsecs(6))
 }
 
 /// MIME type from the file extension; `application/octet-stream` if unknown.

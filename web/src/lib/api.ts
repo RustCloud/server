@@ -29,6 +29,8 @@ export interface FileNode {
   updated_at: string;
   /** When its content was changed, as the uploader said (the file's mtime). */
   modified_at: string;
+  /** When the file was created on the uploader's device, as it said; `created_at` if it didn't. */
+  born_at: string;
   /** When it went to the trash; only for what is in it. */
   trashed_at?: string;
   /** The lock an app holds while editing it: only that app changes it meanwhile. */

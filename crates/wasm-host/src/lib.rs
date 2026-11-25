@@ -41,7 +41,7 @@ mod bindings {
 }
 
 pub use bindings::rustcloud::app::appdata::Entry as AppDataEntry;
-pub use bindings::rustcloud::app::files::{FileLock, Node as FileNode, Version as FileVersion};
+pub use bindings::rustcloud::app::files::{FileLock, FileTimes, Node as FileNode, Version as FileVersion};
 pub use bindings::rustcloud::app::jobs::{
     Job, KindProgress as JobProgress, NewJob, Origin as JobOrigin, Outcome as JobOutcome,
 };
@@ -159,6 +159,10 @@ pub trait UserServices: Send + Sync {
     }
     /// Up to `length` bytes of a version from `offset`.
     async fn files_read_version(&self, _id: &str, _version: &str, _offset: u64, _length: u64) -> Result<Vec<u8>> {
+        Err(unavailable())
+    }
+    /// The times of a file as its client told them.
+    async fn files_get_times(&self, _id: &str) -> Result<FileTimes> {
         Err(unavailable())
     }
 
@@ -1085,6 +1089,10 @@ impl bindings::rustcloud::app::files::Host for Instance {
     ) -> std::result::Result<Vec<u8>, FilesError> {
         let length = length.min(self.limits.data);
         self.host(self.file_services()?.files_read_version(&id, &version_id, offset, length)).await.map_err(files_error)
+    }
+
+    async fn get_times(&mut self, id: String) -> std::result::Result<FileTimes, FilesError> {
+        self.host(self.file_services()?.files_get_times(&id)).await.map_err(files_error)
     }
 }
 

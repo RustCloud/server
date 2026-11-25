@@ -133,6 +133,9 @@ pub mod node {
         /// When the content was last changed as the client that wrote it
         /// says (the file's mtime); `None`: the same as `updated_at`.
         pub modified_at: Option<DateTimeUtc>,
+        /// When the file was created on the device it came from, as its
+        /// client says; `None`: the same as `created_at`.
+        pub born_at: Option<DateTimeUtc>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -242,6 +245,8 @@ pub mod upload_session {
         pub overwrite: bool,
         /// The mtime the file gets.
         pub mtime: Option<DateTimeUtc>,
+        /// When the file was created on the client's device (`born_at`).
+        pub ctime: Option<DateTimeUtc>,
         pub created_at: DateTimeUtc,
         /// Last part received; abandoned sessions go a day after it.
         pub updated_at: DateTimeUtc,

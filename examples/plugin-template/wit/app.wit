@@ -3,7 +3,7 @@
 // The server instantiates the app for each request to its routes
 // (`/app/<id>/...`) and calls `handle`. The app reaches the server only
 // through the interfaces it imports here; everything else is denied.
-package rustcloud:app@0.2.20;
+package rustcloud:app@0.2.21;
 
 interface types {
     /// An HTTP request to the app's routes.
@@ -206,6 +206,20 @@ interface files {
     /// Up to `length` bytes of a version from `offset`, at most
     /// `data-bytes` (`limits`) at once.
     read-version: func(id: string, version-id: string, offset: u64, length: u64) -> result<list<u8>, error>;
+
+    /// The times of a file as the client that uploaded it told them
+    /// (since 0.2.21). `updated-at` of a node is when the server last
+    /// changed it: for a photo uploaded today, today.
+    record file-times {
+        /// RFC 3339. When the content was last changed, as the client that
+        /// wrote it said (the file's mtime); `updated-at` if it didn't.
+        modified-at: string,
+        /// RFC 3339. When the file was created on the device it came from,
+        /// as its client said; when it came to the server if it didn't.
+        born-at: string,
+    }
+
+    get-times: func(id: string) -> result<file-times, error>;
 }
 
 /// Folders of their AppData other users shared with the user the request came

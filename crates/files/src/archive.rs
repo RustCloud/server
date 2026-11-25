@@ -207,6 +207,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             modified_at: None,
+            born_at: None,
             modified_by: None,
             trashed_at: None,
             trashed_from: None,

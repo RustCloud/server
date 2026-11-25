@@ -41,6 +41,7 @@ fn folder(owner: Uuid, parent: Option<Uuid>, name: &str) -> node::ActiveModel {
         trashed_from: Set(None),
         modified_by: Set(None),
         modified_at: Set(None),
+        born_at: Set(None),
     }
 }
 

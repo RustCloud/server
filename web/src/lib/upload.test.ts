@@ -14,6 +14,7 @@ function folder(id: string, name: string): FileNode {
     created_at: '',
     updated_at: '',
     modified_at: '',
+    born_at: '',
   };
 }
 

@@ -23,8 +23,8 @@ use rustcloud_core::{audit, ClientInfo, Error, Result};
 use rustcloud_files::{Files, Locking};
 use rustcloud_plugin_api::Images;
 use rustcloud_wasm_host::{
-    AppDataEntry, AppToken, Caller, FileLock, FileNode, FileVersion, JobProgress, LinkTarget, NewJob, Request,
-    RingKind, Share, StreamMode, TokenScope, User, UserServices, BODY_SIZE_HEADER, SEND_HEADER,
+    AppDataEntry, AppToken, Caller, FileLock, FileNode, FileTimes, FileVersion, JobProgress, LinkTarget, NewJob,
+    Request, RingKind, Share, StreamMode, TokenScope, User, UserServices, BODY_SIZE_HEADER, SEND_HEADER,
 };
 use uuid::Uuid;
 
@@ -681,6 +681,11 @@ impl UserServices for ServicesFor {
                 created_at: v.created_at.to_rfc3339(),
             })
             .collect())
+    }
+
+    async fn files_get_times(&self, id: &str) -> Result<FileTimes> {
+        let node = self.files.app_get(&self.user, &self.app_id, self.file_id(id)?).await?;
+        Ok(FileTimes { modified_at: node.modified_at.to_rfc3339(), born_at: node.born_at.to_rfc3339() })
     }
 
     async fn files_read_version(&self, id: &str, version: &str, offset: u64, length: u64) -> Result<Vec<u8>> {

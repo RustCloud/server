@@ -461,6 +461,9 @@
       `PROPPATCH`. Заодно OPTIONS доходит до маршрутов (раньше его съедал CORS — и у CalDAV).
       Осталось: настоящие блокировки через блокировки файлов; клиенты Nextcloud (им нужны
       `status.php`, OCS и Login Flow v2) — вместе с импортом из Nextcloud
+- [x] Время создания файла от клиента (2026-11-25) — `ctime` при загрузке, `born_at` в `Node` и
+      `PATCH`, WebDAV `creationdate` и `Win32CreationTime`; плагинам — `files.get-times` (API 0.2.21),
+      `updated-at` у них — время загрузки, а не файла ([docs/api/files.md](docs/api/files.md#загрузка))
 - [ ] Хранилище S3 (`BlobStore`)
 - [ ] LDAP (`CredentialProvider`)
 - [ ] OIDC, продолжение (вход сделан 2026-11-06, сервисы — в админке): сервисы из переменных

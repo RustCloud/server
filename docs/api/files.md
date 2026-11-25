@@ -10,7 +10,7 @@
 {
   "id": "…", "parent_id": "…", "name": "report.pdf", "is_dir": false,
   "size": 52133, "mime_type": "application/pdf", "etag": "<sha256>",
-  "created_at": "…", "updated_at": "…", "modified_at": "…"
+  "created_at": "…", "updated_at": "…", "modified_at": "…", "born_at": "…"
 }
 ```
 
@@ -20,6 +20,10 @@
 не передал — время загрузки. Переименование, перемещение и копирование его не меняют, восстановленная
 [версия](#версии) возвращается со своим. Сервер этим временем ни для чего не пользуется: сроки корзины и
 версий считает по своим часам.
+`born_at` — когда файл создан на устройстве, как сказал клиент при загрузке (`ctime`); если не
+сказал — `created_at`, время появления файла на сервере. Новое содержимое того же файла,
+переименование, перемещение и копирование его не меняют. `created_at` всегда остаётся временем
+сервера.
 У того, что лежит в [корзине](#корзина), есть ещё `trashed_at` — когда удалено. В списке папки и
 `GET /files/{id}` у файла, который держит приложение, есть `lock` — см. [Блокировки](#блокировки).
 
@@ -85,7 +89,7 @@
 
 ## Загрузка
 
-`POST /api/v1/files/{folder_id}/upload?name=<имя>[&overwrite=true][&mtime=<время>]` → `201 Node`
+`POST /api/v1/files/{folder_id}/upload?name=<имя>[&overwrite=true][&mtime=<время>][&ctime=<время>]` → `201 Node`
 
 Тело — сырые байты файла, не `multipart`. Поток пишется сразу в хранилище, размер не
 ограничен памятью.
@@ -104,6 +108,11 @@ curl -H "Authorization: Bearer $TOKEN" --data-binary @photo.jpg \
 (`2024-11-07T13:20:00Z`). Не раньше 1970 года и не больше чем на сутки вперёд, иначе
 `400 INVALID_MTIME`; хранится с точностью до микросекунды.
 
+`ctime` — когда файл создан на устройстве клиента (для фото — дата съёмки, если клиент её знает), в
+том же виде и с теми же границами, иначе `400 INVALID_CTIME`. Становится `born_at` только у нового
+файла: если `overwrite` заменил содержимое существующего, у него остаётся прежнее время создания.
+Старые серверы неизвестный параметр пропускают, так что клиенты могут слать его всегда.
+
 Ошибки: `409 NAME_TAKEN` (без `overwrite`), `413 FILE_TOO_LARGE`
 ([`files.max_upload_mib`](../configuration.md#files)), `413 QUOTA_EXCEEDED`.
 
@@ -115,14 +124,14 @@ curl -H "Authorization: Bearer $TOKEN" --data-binary @photo.jpg \
 
 | Запрос                                         | Ответ                                       |
 |------------------------------------------------|---------------------------------------------|
-| `POST /api/v1/files/{folder_id}/uploads`       | `201 Upload` — начать: `{name, size, overwrite?, mtime?}` |
+| `POST /api/v1/files/{folder_id}/uploads`       | `201 Upload` — начать: `{name, size, overwrite?, mtime?, ctime?}` |
 | `PUT /api/v1/files/uploads/{id}?offset=<байт>` | `Upload` — следующий кусок, тело — сырые байты |
 | `GET /api/v1/files/uploads/{id}`               | `Upload` — сколько принято (`received`)     |
 | `GET /api/v1/files/uploads`                    | `[Upload]` — незаконченные загрузки пользователя |
 | `POST /api/v1/files/uploads/{id}/finish`       | `201 Node` — собрать файл: `{sha256}`       |
 | `DELETE /api/v1/files/uploads/{id}`            | `204` — отменить, принятое удаляется        |
 
-`Upload`: `{id, folder_id, name, size, received, overwrite, mtime, created_at, expires_at}`.
+`Upload`: `{id, folder_id, name, size, received, overwrite, mtime, ctime, created_at, expires_at}`.
 
 - **Начало.** Имя, папка и место проверяются сразу: `409 NAME_TAKEN`, `413 FILE_TOO_LARGE`,
   `413 QUOTA_EXCEEDED`, `413 STORAGE_FULL`. Заявленный `size` сразу занимает квоту — другие загрузки
@@ -148,7 +157,7 @@ curl -H "Authorization: Bearer $TOKEN" --data-binary @photo.jpg \
 | Запрос                                 | Тело                       | Ответ      |
 |----------------------------------------|----------------------------|------------|
 | `POST /api/v1/files/{id}/folders`      | `{name}`                   | `201 Node` |
-| `PATCH /api/v1/files/{id}`             | `{name?, parent_id?, modified_at?}` — переименовать, переместить, сменить mtime файла (RFC 3339) | `Node` |
+| `PATCH /api/v1/files/{id}`             | `{name?, parent_id?, modified_at?, born_at?}` — переименовать, переместить, сменить mtime или время создания файла (RFC 3339; у папок — `400 NOT_A_FILE`) | `Node` |
 | `POST /api/v1/files/{id}/copy`         | `{parent_id, name?}`       | `201 Node` |
 | `DELETE /api/v1/files/{id}`            | —                          | `204` — в [корзину](#корзина); в корзине — навсегда, папки со всем содержимым |
 

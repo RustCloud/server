@@ -32,19 +32,22 @@ Windows по умолчанию не отправляет Basic по `http://` �
 | `MKCOL` | папка; уже есть → `405`, нет папки выше → `409` |
 | `DELETE` | в корзину, как в интерфейсе |
 | `COPY`, `MOVE` | в `Destination` (полный URL или путь под `/dav/`); `Overwrite: F` и место занято → `412`; заменённое уходит в корзину |
-| `PROPPATCH` | только время изменения файла, остальное → `403` (всё или ничего, RFC 4918) |
+| `PROPPATCH` | только время изменения и создания файла, остальное → `403` (всё или ничего, RFC 4918) |
 | `LOCK`, `UNLOCK` | блокировки для совместимости, см. ниже |
 
 **Свойства** (`allprop`): `resourcetype`, `displayname`, `getcontentlength`, `getcontenttype`,
 `getetag` (только у файлов), `getlastmodified` (время изменения, которое дал клиент — см.
-[mtime](files.md)), `creationdate`, `supportedlock`, `lockdiscovery`. По запросу — квота
+[mtime](files.md)), `creationdate` (время создания на устройстве клиента, `born_at` в
+[API файлов](files.md); если клиент его не дал — когда файл появился на сервере), `supportedlock`, `lockdiscovery`. По запросу — квота
 (RFC 4331): `quota-used-bytes`, `quota-available-bytes` (меньшее из остатка квоты и места на диске).
 
 **Время изменения** клиент задаёт:
 - заголовком `X-OC-Mtime: <секунды Unix>` в `PUT` (rclone, клиенты Nextcloud), ответ —
   `X-OC-MTime: accepted`;
-- `PROPPATCH` свойства `getlastmodified` или `Win32LastModifiedTime` (Windows). Остальные
-  `Win32*` принимаются и не сохраняются.
+- `PROPPATCH` свойства `getlastmodified` или `Win32LastModifiedTime` (Windows).
+
+**Время создания** задаёт Windows: `PROPPATCH` свойства `Win32CreationTime` после копирования файла.
+Остальные `Win32*` принимаются и не сохраняются.
 
 **Блокировки.** Finder и Windows пишут только на сервер класса 2, поэтому `LOCK` выдаёт токен
 (`Lock-Token`, `Timeout: Second-3600`), но сервер блокировку **не соблюдает**: файл может изменить

@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::archive::ZipDownload;
 use crate::changes::{ChangePage, ChangeWatch, HINT_EVERY, WATCH_TIME};
 use crate::content;
-use crate::service::{Files, Node, NodeUpdate, Usage};
+use crate::service::{FileTimes, Files, Node, NodeUpdate, Usage};
 use crate::shares::{PublicView, Share, ShareOptions, LINK_COOKIE};
 use crate::sharing::{Access, Given, NewAccess, Received};
 use crate::storage::{SpeedTestResult, StorageReport};
@@ -137,6 +137,8 @@ struct UploadParams {
     overwrite: bool,
     /// See [`parse_mtime`].
     mtime: Option<String>,
+    /// When the file was created on the client's device; as `mtime`.
+    ctime: Option<String>,
 }
 
 /// Uploads a file: the request body is the raw file content.
@@ -147,9 +149,12 @@ async fn upload(
     Query(params): Query<UploadParams>,
     body: Body,
 ) -> Result<impl IntoResponse> {
-    let mtime = params.mtime.as_deref().map(parse_mtime).transpose()?;
+    let times = FileTimes {
+        mtime: params.mtime.as_deref().map(parse_mtime).transpose()?,
+        ctime: params.ctime.as_deref().map(parse_ctime).transpose()?,
+    };
     let body = byte_stream(body);
-    let node = files.upload(current.user(), parent_id, &params.name, body, params.overwrite, mtime).await?;
+    let node = files.upload(current.user(), parent_id, &params.name, body, params.overwrite, times).await?;
     Ok((StatusCode::CREATED, Json(node)))
 }
 
@@ -159,6 +164,8 @@ struct StartUpload {
     upload: NewUpload,
     /// See [`parse_mtime`].
     mtime: Option<String>,
+    /// When the file was created on the client's device; as `mtime`.
+    ctime: Option<String>,
 }
 
 async fn start_upload(
@@ -168,7 +175,8 @@ async fn start_upload(
     Json(params): Json<StartUpload>,
 ) -> Result<impl IntoResponse> {
     let mtime = params.mtime.as_deref().map(parse_mtime).transpose()?;
-    let upload = NewUpload { mtime, ..params.upload };
+    let ctime = params.ctime.as_deref().map(parse_ctime).transpose()?;
+    let upload = NewUpload { mtime, ctime, ..params.upload };
     Ok((StatusCode::CREATED, Json(files.start_upload(current.user(), folder_id, upload).await?)))
 }
 
@@ -245,17 +253,27 @@ async fn replace_content(
 /// The mtime of an uploaded file: Unix time in seconds (`1730985600`,
 /// `1730985600.25`) or RFC 3339 (`2024-11-07T13:20:00Z`).
 pub(crate) fn parse_mtime(text: &str) -> Result<DateTime<Utc>> {
-    let invalid = || Error::bad_request("INVALID_MTIME", "mtime must be Unix seconds or an RFC 3339 time");
+    parse_time(text)
+        .ok_or_else(|| Error::bad_request("INVALID_MTIME", "mtime must be Unix seconds or an RFC 3339 time"))
+}
+
+/// The creation time of an uploaded file, in the same forms as [`parse_mtime`].
+pub(crate) fn parse_ctime(text: &str) -> Result<DateTime<Utc>> {
+    parse_time(text)
+        .ok_or_else(|| Error::bad_request("INVALID_CTIME", "ctime must be Unix seconds or an RFC 3339 time"))
+}
+
+fn parse_time(text: &str) -> Option<DateTime<Utc>> {
     let text = text.trim();
     if let Ok(seconds) = text.parse::<f64>() {
         if !seconds.is_finite() {
-            return Err(invalid());
+            return None;
         }
         let micros = (seconds * 1e6).round();
         // Beyond ±292 000 years `as` would saturate; check_mtime refuses those anyway.
-        return DateTime::from_timestamp_micros(micros as i64).ok_or_else(invalid);
+        return DateTime::from_timestamp_micros(micros as i64);
     }
-    DateTime::parse_from_rfc3339(text).map(|time| time.with_timezone(&Utc)).map_err(|_| invalid())
+    DateTime::parse_from_rfc3339(text).map(|time| time.with_timezone(&Utc)).ok()
 }
 
 async fn unlock(State(files): State<Arc<Files>>, current: CurrentUser, Path(id): Path<Uuid>) -> Result<StatusCode> {

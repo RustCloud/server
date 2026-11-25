@@ -2853,13 +2853,50 @@ async fn sync_clients_read_the_change_feed_and_hear_of_new_changes() {
 }
 
 #[tokio::test]
+async fn files_keep_the_creation_time_their_client_gave() {
+    let app = TestApp::new().await;
+    let cookie = app.register("admin").await;
+    let root = app.root_id(&cookie).await;
+    let upload = |query: &'static str| {
+        let uri = format!("/api/v1/files/{root}/upload?{query}");
+        let (app, cookie) = (&app, cookie.as_str());
+        async move { app.send(Method::POST, &uri, As::Browser(cookie), Body::from("png"), &[]).await }
+    };
+
+    let reply = upload("name=shot.png&mtime=1710000000&ctime=1709000000").await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text());
+    let file = reply.json();
+    assert_eq!(file["modified_at"], "2024-03-09T16:00:00Z");
+    assert_eq!(file["born_at"], "2024-02-27T02:13:20Z");
+    assert_ne!(file["created_at"], file["born_at"], "the server's own time stays");
+
+    // Replacing the content keeps it.
+    let replaced = upload("name=shot.png&overwrite=true&ctime=2024-05-01T00:00:00Z").await.json();
+    assert_eq!((&replaced["id"], &replaced["born_at"]), (&file["id"], &file["born_at"]));
+
+    // A client sets it later on a file it uploaded before.
+    let plain = upload("name=plain.png").await.json();
+    assert_eq!(plain["born_at"], plain["created_at"]);
+    let uri = format!("/api/v1/files/{}", plain["id"].as_str().unwrap());
+    let told = app.json(Method::PATCH, &uri, As::Browser(&cookie), json!({ "born_at": "2024-02-27T10:00:00Z" })).await;
+    assert_eq!(told.status, StatusCode::OK, "{}", told.text());
+    assert_eq!(told.json()["born_at"], "2024-02-27T10:00:00Z");
+
+    for query in ["name=a.png&ctime=yesterday", "name=a.png&ctime=-1"] {
+        let refused = upload(query).await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+        assert_eq!(refused.json()["error"]["code"], "INVALID_CTIME", "{query}");
+    }
+}
+
+#[tokio::test]
 async fn large_files_are_uploaded_in_parts() {
     use sha2::Digest;
     let app = TestApp::new().await;
     let cookie = app.register("admin").await;
     let root = app.root_id(&cookie).await;
 
-    let start = json!({ "name": "video.mp4", "size": 10, "mtime": "1700000000" });
+    let start = json!({ "name": "video.mp4", "size": 10, "mtime": "1700000000", "ctime": "1690000000" });
     let reply = app.json(Method::POST, &format!("/api/v1/files/{root}/uploads"), As::Browser(&cookie), start).await;
     assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text());
     let id = reply.json()["id"].as_str().unwrap().to_owned();
@@ -2886,6 +2923,7 @@ async fn large_files_are_uploaded_in_parts() {
     let file = reply.json();
     assert_eq!(file["etag"], sha256.as_str());
     assert_eq!(file["modified_at"], "2023-11-14T22:13:20Z");
+    assert_eq!(file["born_at"], "2023-07-22T04:26:40Z");
     let content =
         app.get(&format!("/api/v1/files/{}/content", file["id"].as_str().unwrap()), As::Browser(cookie)).await;
     assert_eq!(content.text(), "0123456789");
@@ -2958,8 +2996,9 @@ async fn files_are_reached_over_webdav() {
     let into_itself = [("destination", "/dav/Docs/Inner/")];
     assert_eq!(dav(&app, laptop, "MOVE", "/dav/Docs/", "", &into_itself).await.status, StatusCode::FORBIDDEN);
 
-    // Windows sets the time of a file it copied; other properties are refused.
+    // Windows sets the times of a file it copied; other properties are refused.
     let patch = r#"<d:propertyupdate xmlns:d="DAV:" xmlns:w="urn:schemas-microsoft-com:"><d:set><d:prop>
+        <w:Win32CreationTime>Tue, 19 Feb 2008 08:00:00 GMT</w:Win32CreationTime>
         <w:Win32LastModifiedTime>Wed, 20 Feb 2008 17:44:48 GMT</w:Win32LastModifiedTime>
         <w:Win32FileAttributes>00000020</w:Win32FileAttributes></d:prop></d:set></d:propertyupdate>"#;
     let patched = dav(&app, laptop, "PROPPATCH", "/dav/Docs/Moved.txt", patch, &[]).await;
@@ -2967,6 +3006,9 @@ async fn files_are_reached_over_webdav() {
     assert!(patched.text().contains("200 OK") && !patched.text().contains("403"), "{}", patched.text());
     let moved = dav(&app, laptop, "GET", "/dav/Docs/Moved.txt", "", &[]).await;
     assert_eq!(moved.header(header::LAST_MODIFIED), "Wed, 20 Feb 2008 17:44:48 GMT");
+    let created = r#"<d:propfind xmlns:d="DAV:"><d:prop><d:creationdate/></d:prop></d:propfind>"#;
+    let created = dav(&app, laptop, "PROPFIND", "/dav/Docs/Moved.txt", created, &[("depth", "0")]).await.text();
+    assert!(created.contains("<D:creationdate>2008-02-19T08:00:00Z</D:creationdate>"), "{created}");
     let foreign = r#"<d:propertyupdate xmlns:d="DAV:"><d:set><d:prop><d:displayname>x</d:displayname>
         </d:prop></d:set></d:propertyupdate>"#;
     let refused = dav(&app, laptop, "PROPPATCH", "/dav/Docs/Moved.txt", foreign, &[]).await.text();

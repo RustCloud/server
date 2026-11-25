@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::events::FileEventKind;
-use crate::service::{check_mtime, Files, Node, Writer};
+use crate::service::{check_ctime, check_mtime, Files, Node, Writer};
 
 /// Most sessions a user may have open at once.
 pub const MAX_UPLOADS: u64 = 20;
@@ -53,6 +53,9 @@ pub struct NewUpload {
     /// The file's mtime (see [`Node::modified_at`]).
     #[serde(skip)]
     pub mtime: Option<DateTime<Utc>>,
+    /// When the file was created on the client's device (see [`Node::born_at`]).
+    #[serde(skip)]
+    pub ctime: Option<DateTime<Utc>>,
 }
 
 /// A session as the client sees it.
@@ -66,6 +69,7 @@ pub struct Upload {
     pub received: i64,
     pub overwrite: bool,
     pub mtime: Option<DateTime<Utc>>,
+    pub ctime: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     /// When the session goes if no part comes before.
     pub expires_at: DateTime<Utc>,
@@ -81,6 +85,7 @@ impl From<upload_session::Model> for Upload {
             received: row.received,
             overwrite: row.overwrite,
             mtime: row.mtime,
+            ctime: row.ctime,
             created_at: row.created_at,
             expires_at: row.updated_at + ABANDONED_AFTER,
         }
@@ -92,6 +97,7 @@ impl Files {
     pub async fn start_upload(&self, user: &User, folder_id: Uuid, upload: NewUpload) -> Result<Upload> {
         let name = validate::file_name(&upload.name)?.to_owned();
         let mtime = upload.mtime.map(check_mtime).transpose()?;
+        let ctime = upload.ctime.map(check_ctime).transpose()?;
         if upload.size < 0 {
             return Err(Error::bad_request("INVALID_SIZE", "The size can't be negative"));
         }
@@ -136,6 +142,7 @@ impl Files {
             parts: Set(0),
             overwrite: Set(upload.overwrite),
             mtime: Set(mtime),
+            ctime: Set(ctime),
             created_at: Set(now),
             updated_at: Set(now),
             finishing_at: Set(None),
@@ -382,7 +389,8 @@ impl Files {
         // uploads; a file that goes into someone else's folder (shared for
         // changes) is paid from that owner's quota, where nothing was set aside.
         let reserved = if folder.owner_id == user.id { session.size } else { 0 };
-        let writer = Writer { mtime: session.mtime, reserved, sha256: Some(sha256), ..Writer::user() };
+        let writer =
+            Writer { mtime: session.mtime, ctime: session.ctime, reserved, sha256: Some(sha256), ..Writer::user() };
         self.put_file(user, &folder, &session.name, body, session.overwrite, writer).await
     }
 

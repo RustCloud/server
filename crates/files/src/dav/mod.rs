@@ -14,8 +14,8 @@
 //! - locks (class 2, which Finder and Windows need to write) are granted but
 //!   not kept: anyone may still change a "locked" file;
 //! - PROPPATCH sets only the modification time (`getlastmodified`, Windows'
-//!   `Win32LastModifiedTime`); Windows' other properties are accepted and
-//!   dropped, other properties are refused;
+//!   `Win32LastModifiedTime`) and Windows' `Win32CreationTime`; Windows'
+//!   other properties are accepted and dropped, other properties are refused;
 //! - `X-OC-Mtime` of PUT (Unix seconds, sent by rclone and Nextcloud
 //!   clients) sets the modification time as well.
 
@@ -40,7 +40,7 @@ use uuid::Uuid;
 
 use crate::content;
 use crate::http::{byte_stream, parse_mtime};
-use crate::service::{Files, Node, NodeUpdate};
+use crate::service::{FileTimes, Files, Node, NodeUpdate};
 use crate::trash::TRASH_FOLDER;
 use xml::{empty_element, escape, status_line, Element, DAV};
 
@@ -387,7 +387,7 @@ fn property(name: &str, node: &Node, room: Option<(i64, Option<u64>)>) -> Option
         "getcontenttype" => node.mime_type.as_deref().filter(|_| file).map(escape),
         "getetag" => node.etag.as_ref().map(|etag| escape(&format!("\"{etag}\""))),
         "getlastmodified" => Some(http_date(node.modified_at)),
-        "creationdate" => Some(node.created_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        "creationdate" => Some(node.born_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
         "supportedlock" => Some(
             "<D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry>\
              <D:lockentry><D:lockscope><D:shared/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry>"
@@ -407,19 +407,26 @@ async fn proppatch(files: &Files, user: &User, target: &Target, body: Body) -> R
         .ok_or_else(|| Error::bad_request("INVALID_XML", "Expected <propertyupdate>"))?;
 
     let mut results: Vec<(&Element, StatusCode)> = Vec::new();
-    let mut mtime = None;
+    let mut times = NodeUpdate::default();
     for change in &update.children {
         let set = change.is(DAV, "set");
         if !set && !change.is(DAV, "remove") {
             continue;
         }
         for prop in change.dav_child("prop").into_iter().flat_map(|prop| &prop.children) {
-            let status = if prop.is(DAV, "getlastmodified") || prop.is(MS, "Win32LastModifiedTime") {
-                // Folders have no time of their own; removing it changes nothing.
+            let time = if prop.is(DAV, "getlastmodified") || prop.is(MS, "Win32LastModifiedTime") {
+                Some(&mut times.modified_at)
+            } else if prop.is(MS, "Win32CreationTime") {
+                Some(&mut times.born_at)
+            } else {
+                None
+            };
+            let status = if let Some(time) = time {
+                // Folders have no times of their own; removing one changes nothing.
                 if set && !node.is_dir {
                     match DateTime::parse_from_rfc2822(prop.text.trim()) {
-                        Ok(time) => {
-                            mtime = Some(time.with_timezone(&Utc));
+                        Ok(parsed) => {
+                            *time = Some(parsed.with_timezone(&Utc));
                             StatusCode::OK
                         }
                         Err(_) => StatusCode::CONFLICT,
@@ -443,8 +450,8 @@ async fn proppatch(files: &Files, user: &User, target: &Target, body: Body) -> R
                 *status = StatusCode::FAILED_DEPENDENCY;
             }
         }
-    } else if let Some(mtime) = mtime {
-        files.update(user, node.id, NodeUpdate { modified_at: Some(mtime), ..Default::default() }).await?;
+    } else if times.modified_at.is_some() || times.born_at.is_some() {
+        files.update(user, node.id, times).await?;
     }
 
     let mut answer = multistatus_start();
@@ -482,7 +489,8 @@ async fn put(files: &Files, user: &User, target: &Target, headers: &HeaderMap, b
                 return Err(precondition_failed());
             }
             let parent = target.new_parent()?;
-            (files.upload(user, parent.id, target.name(), body, false, mtime).await?, StatusCode::CREATED)
+            let times = FileTimes { mtime, ctime: None };
+            (files.upload(user, parent.id, target.name(), body, false, times).await?, StatusCode::CREATED)
         }
     };
     let mut response = status.into_response();
@@ -552,7 +560,7 @@ async fn transfer(files: &Files, user: &User, source: &Target, headers: &HeaderM
         let update = NodeUpdate {
             name: (name != node.name).then(|| name.to_owned()),
             parent_id: (node.parent_id != Some(parent.id)).then_some(parent.id),
-            modified_at: None,
+            ..Default::default()
         };
         files.update(user, node.id, update).await?;
     } else if node.is_dir && header(headers, "depth").map(str::trim) == Some("0") {
@@ -583,7 +591,7 @@ async fn lock(files: &Files, user: &User, target: &Target, headers: &HeaderMap, 
         None => {
             let parent = target.new_parent()?;
             let empty: rustcloud_core::ByteStream = Box::pin(futures_util::stream::empty());
-            files.upload(user, parent.id, target.name(), empty, false, None).await?;
+            files.upload(user, parent.id, target.name(), empty, false, FileTimes::default()).await?;
             (false, StatusCode::CREATED)
         }
     };
