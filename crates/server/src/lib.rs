@@ -225,11 +225,26 @@ pub fn app(state: AppState) -> Router {
         .layer(SetResponseHeaderLayer::overriding(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")))
         .layer(SetResponseHeaderLayer::if_not_present(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY")))
         .layer(SetResponseHeaderLayer::overriding(header::REFERRER_POLICY, HeaderValue::from_static("same-origin")))
-        // The path only: queries carry tokens (links, services' access tokens).
+        // The path only, without tokens: queries carry tokens (links, services'
+        // access tokens), and so do the paths of links.
         .layer(TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<axum::body::Body>| {
-            tracing::debug_span!("request", method = %request.method(), path = request.uri().path())
+            tracing::debug_span!("request", method = %request.method(), path = %loggable_path(request.uri().path()))
         }))
         .with_state(state)
+}
+
+/// Paths whose next segment is a token that opens files by itself.
+const TOKEN_PATHS: [&str; 2] = ["/api/v1/app-links/", "/api/v1/public/"];
+
+/// `path` fit for a log: the token of a link is left out.
+fn loggable_path(path: &str) -> std::borrow::Cow<'_, str> {
+    for prefix in TOKEN_PATHS {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            let after = rest.find('/').map_or("", |at| &rest[at..]);
+            return format!("{prefix}…{after}").into();
+        }
+    }
+    path.into()
 }
 
 /// `GET /health`: 200 when the server and its database work.
@@ -327,3 +342,16 @@ async fn journal_entries(
 
 /// Result of startup code, where any failure just stops the program with a message.
 pub type StartupResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+#[cfg(test)]
+mod tests {
+    use super::loggable_path;
+
+    #[test]
+    fn logs_never_get_the_tokens_of_links() {
+        assert_eq!(loggable_path("/api/v1/app-links/eyJz.sig/3.m4s"), "/api/v1/app-links/…/3.m4s");
+        assert_eq!(loggable_path("/api/v1/app-links/eyJz.sig"), "/api/v1/app-links/…");
+        assert_eq!(loggable_path("/api/v1/public/abc/content"), "/api/v1/public/…/content");
+        assert_eq!(loggable_path("/api/v1/files/root"), "/api/v1/files/root");
+    }
+}

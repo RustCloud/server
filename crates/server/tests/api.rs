@@ -759,6 +759,20 @@ async fn apps_send_files_of_any_size_and_give_their_pages_links_to_them() {
     assert_eq!(app.get(&not_a_stream, As::Anonymous).await.status, StatusCode::NOT_FOUND, "a file's link is no stream");
     assert_eq!(followed.header(header::ACCESS_CONTROL_ALLOW_ORIGIN), "*", "hls.js fetches from the page's origin");
 
+    // Opened as a page (pasted, sent on), it works only in a browser logged in as its user.
+    let dest = header::HeaderName::from_static("sec-fetch-dest");
+    let as_page = [(dest.clone(), "document")];
+    let elsewhere = app.send(Method::GET, &link, As::Anonymous, Body::empty(), &as_page).await;
+    assert_eq!(elsewhere.status, StatusCode::NOT_FOUND, "another browser");
+    let bob = app.register("bob").await;
+    let bobs = app.send(Method::GET, &link, As::Browser(&bob), Body::empty(), &as_page).await;
+    assert_eq!(bobs.status, StatusCode::NOT_FOUND, "another user");
+    let own = app.send(Method::GET, &link, As::Browser(&alice), Body::empty(), &as_page).await;
+    assert_eq!(own.status, StatusCode::OK, "its user, in a new tab");
+    let as_image = [(dest, "image")];
+    let image = app.send(Method::GET, &link, As::Anonymous, Body::empty(), &as_image).await;
+    assert_eq!(image.status, StatusCode::OK, "the app's page, without a cookie");
+
     // Taking access back ends the link; so does logging out.
     let revoke = format!("/api/v1/grants/{}", grant["id"].as_str().unwrap());
     app.send(Method::DELETE, &revoke, As::Browser(&alice), Body::empty(), &[]).await;

@@ -11,6 +11,14 @@
 //! the file for the user and the file is that version: a link ends with the
 //! session, the access or the file.
 //!
+//! A link carries its own permission, so one that leaves the user's device
+//! must not work for long or for just anyone:
+//! - it ends within [`LINK_LIFETIME`], unless a player keeps using it: then
+//!   it lives on while used, up to [`LINK_LIFETIME_IN_USE`];
+//! - opened as a page (pasted into the address bar, sent in a message), it
+//!   works only in a browser logged in as its user: the app's page loads it
+//!   as an image, a video or by script, never as a page.
+//!
 //! A link may also be a video's HLS stream (`links.video-stream`):
 //! `<link>/index.m3u8`, `<link>/init.mp4` and `<link>/<n>.m4s`, made by the
 //! media engine when the player asks ([`rustcloud_media`]'s `stream`).
@@ -156,16 +164,29 @@ struct ReplaceClaims {
 /// How long an upload link waits for its upload to start, in seconds.
 pub const UPLOAD_WITHIN: i64 = 15 * 60;
 
-/// How long a link to a file works at least, in seconds (also while the
-/// session lives on): a link that leaked doesn't stay good for days. It
-/// ends at a full hour, so all links made within an hour are the same and
-/// the browser's cache keeps working.
-pub const LINK_LIFETIME: i64 = 12 * 60 * 60;
+/// How long a link to a file works at most, in seconds, unless it is in use
+/// (also while the session lives on): a link that leaked doesn't stay good
+/// for long. It ends at a quarter of an hour, so links made within one are
+/// the same and the browser's cache keeps working.
+pub const LINK_LIFETIME: i64 = 3 * 60 * 60;
 
-/// When a link made now ends: 12 to 13 hours on, at a full hour.
+/// Links end at multiples of this, in seconds.
+const LINK_STEP: i64 = 15 * 60;
+
+/// A link used within this many seconds still works after its end: a video
+/// longer than [`LINK_LIFETIME`] plays on, and so does one paused for a while.
+const IN_USE_GRACE: i64 = 15 * 60;
+
+/// How long after its end a link in use works at most, in seconds.
+pub const LINK_LIFETIME_IN_USE: i64 = 6 * 60 * 60;
+
+/// How many links in use are remembered; beyond that, ended links aren't
+/// kept alive (they are pruned first).
+const IN_USE_KEPT: usize = 10_000;
+
+/// When a link made now ends: 2¾ to 3 hours on, at a quarter of an hour.
 fn link_end() -> i64 {
-    let hour = 60 * 60;
-    (Utc::now().timestamp() / hour + 1) * hour + LINK_LIFETIME
+    (Utc::now().timestamp() / LINK_STEP + 1) * LINK_STEP + LINK_LIFETIME - LINK_STEP
 }
 
 /// Videos remembered at most: their pieces and init segments.
@@ -191,6 +212,8 @@ pub struct AppLinks {
     streams: Mutex<Streams>,
     /// Upload links used or in use, with when they end.
     spent: Mutex<HashMap<u64, i64>>,
+    /// Links to files by their signature, with when they were last used.
+    in_use: Mutex<HashMap<String, i64>>,
 }
 
 impl AppLinks {
@@ -201,8 +224,8 @@ impl AppLinks {
         tokens: AppTokens,
         bodies: PathBuf,
     ) -> Self {
-        let (streams, spent) = (Mutex::default(), Mutex::default());
-        Self { key: rand::random(), tokens, bodies, files, storage, media, streams, spent }
+        let (streams, spent, in_use) = (Mutex::default(), Mutex::default(), Mutex::default());
+        Self { key: rand::random(), tokens, bodies, files, storage, media, streams, spent, in_use }
     }
 
     /// A link for the page of `app_id` in `session` to `target`, if the user
@@ -306,6 +329,14 @@ impl AppLinks {
         let mut spent = self.spent.lock().unwrap_or_else(|e| e.into_inner());
         spent.retain(|_, until| *until >= now);
         spent.insert(r, x).is_none()
+    }
+
+    /// Whether a link to a file ending at `end` still works `now`, and notes
+    /// that it was used: before its end, or after it while a player keeps
+    /// using it.
+    fn still_valid(&self, token: &str, end: i64, now: i64) -> bool {
+        let signature = token.rsplit_once('.').map_or(token, |(_, signature)| signature);
+        still_valid(&mut self.in_use.lock().unwrap_or_else(|e| e.into_inner()), signature, end, now)
     }
 
     /// Gives an upload link back after its upload failed, to be tried again.
@@ -437,18 +468,38 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/app-links/{token}/{name}", get(follow_stream))
 }
 
+/// Whether the link signed `signature`, ending at `end`, still works `now`;
+/// notes in `in_use` (last use by signature) that it was used.
+fn still_valid(in_use: &mut HashMap<String, i64>, signature: &str, end: i64, now: i64) -> bool {
+    let used_lately = in_use.get(signature).is_some_and(|last| *last >= now - IN_USE_GRACE);
+    if now > end && !(used_lately && now <= end + LINK_LIFETIME_IN_USE) {
+        return false;
+    }
+    if in_use.len() >= IN_USE_KEPT && !in_use.contains_key(signature) {
+        in_use.retain(|_, last| *last >= now - IN_USE_GRACE);
+    }
+    if in_use.len() < IN_USE_KEPT || in_use.contains_key(signature) {
+        in_use.insert(signature.to_owned(), now);
+    }
+    true
+}
+
 fn gone() -> Error {
     Error::not_found("LINK_NOT_FOUND", "The link is no longer valid")
 }
 
-/// What a link says, and its user, while it is valid: signed here, the
-/// session alive, the plugin running, the file readable and that version.
-async fn check(state: &AppState, token: &str) -> Result<(Claims, User)> {
+/// What a link says, and its user, while it is valid: signed here, not
+/// ended (or still in use), the session alive, opened by the app's page or
+/// by its user, the plugin running, the file readable and that version.
+async fn check(state: &AppState, token: &str, headers: &HeaderMap) -> Result<(Claims, User)> {
     let claims: Claims = state.links.open(token).ok_or_else(gone)?;
-    if claims.x < Utc::now().timestamp() {
-        return Err(gone());
-    }
     let session = state.auth.session_by_id(claims.s).await?.ok_or_else(gone)?;
+    if opened_as_page(headers) {
+        let opener = crate::service_proxy::session_user(&state.auth, headers).await.map_err(|_| gone())?;
+        if opener.id != session.user.id {
+            return Err(gone());
+        }
+    }
     if state.plugins.get(&claims.a).is_none() {
         return Err(gone());
     }
@@ -456,7 +507,18 @@ async fn check(state: &AppState, token: &str) -> Result<(Claims, User)> {
     if file.etag.as_deref().unwrap_or_default() != claims.e {
         return Err(gone());
     }
+    if !state.links.still_valid(token, claims.x, Utc::now().timestamp()) {
+        return Err(gone());
+    }
     Ok((claims, session.user))
+}
+
+/// Whether the browser opens the link as a page of its own: typed or pasted
+/// into the address bar, a link followed, "open image in new tab". Pages of
+/// apps load links as images, media or by script (`image`, `video`, `empty`)
+/// and download them within their frame (`iframe`).
+fn opened_as_page(headers: &HeaderMap) -> bool {
+    headers.get("sec-fetch-dest").is_some_and(|dest| dest.as_bytes().eq_ignore_ascii_case(b"document"))
 }
 
 /// Headers of every answer to a link. The page that uses it is the app's,
@@ -471,7 +533,7 @@ fn for_pages(mut response: Response) -> Response {
 
 /// `GET /api/v1/app-links/<token>`: the file of a link.
 async fn follow(State(state): State<AppState>, Path(token): Path<String>, request: HeaderMap) -> Result<Response> {
-    let (claims, user) = check(&state, &token).await?;
+    let (claims, user) = check(&state, &token, &request).await?;
     if claims.m.is_some() {
         return Err(gone());
     }
@@ -529,8 +591,12 @@ async fn replace(state: AppState, claims: ReplaceClaims, body: Body) -> Result<R
 }
 
 /// `GET /api/v1/app-links/<token>/index.m3u8 | init.mp4 | <n>.m4s`: a video's stream.
-async fn follow_stream(State(state): State<AppState>, Path((token, name)): Path<(String, String)>) -> Result<Response> {
-    let (claims, user) = check(&state, &token).await?;
+async fn follow_stream(
+    State(state): State<AppState>,
+    Path((token, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response> {
+    let (claims, user) = check(&state, &token, &headers).await?;
     let mode = claims.m.ok_or_else(gone)?;
     if !state.plugins.config(&claims.a).uses.iter().any(|tool| tool == "ffmpeg") {
         return Err(gone());
@@ -579,6 +645,29 @@ mod tests {
              #EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init.mp4\"\n\
              #EXTINF:6.000,\n0.m4s\n#EXTINF:2.500,\n1.m4s\n#EXT-X-ENDLIST\n"
         );
+    }
+
+    #[test]
+    fn links_end_within_hours_unless_a_player_keeps_using_them() {
+        let end = link_end();
+        let now = Utc::now().timestamp();
+        assert!((now + LINK_LIFETIME - LINK_STEP..=now + LINK_LIFETIME).contains(&end), "{}", end - now);
+        assert_eq!(end % LINK_STEP, 0, "links made within a quarter of an hour are the same");
+
+        let mut in_use = HashMap::new();
+        let minute = 60;
+        assert!(still_valid(&mut in_use, "a", end, end - minute));
+        assert!(!still_valid(&mut in_use, "b", end, end + minute), "left alone, it ends");
+        // Used every few minutes, as by a video playing, it lives on.
+        let mut at = end - minute;
+        while at < end + LINK_LIFETIME_IN_USE - 10 * minute {
+            at += 10 * minute;
+            assert!(still_valid(&mut in_use, "a", end, at), "{}", at - end);
+        }
+        assert!(!still_valid(&mut in_use, "a", end, end + LINK_LIFETIME_IN_USE + minute), "but not for ever");
+        // Paused for longer than the grace, it ends.
+        assert!(still_valid(&mut in_use, "c", end, end - minute));
+        assert!(!still_valid(&mut in_use, "c", end, end + IN_USE_GRACE));
     }
 
     #[test]

@@ -441,7 +441,7 @@ async fn handle(state: &AppState, route: ProxyRoute, request: Request) -> Result
 
 /// The user of the browser session (the cookie only: the service's pages
 /// are what calls), or 401.
-async fn session_user(auth: &Auth, headers: &HeaderMap) -> Result<User> {
+pub(crate) async fn session_user(auth: &Auth, headers: &HeaderMap) -> Result<User> {
     let token = cookies(headers).find(|(name, _)| *name == SESSION_COOKIE).map(|(_, value)| value);
     let token = token.ok_or_else(|| Error::unauthorized("Not logged in"))?;
     let session = auth
